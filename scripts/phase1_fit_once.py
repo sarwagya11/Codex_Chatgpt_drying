@@ -311,7 +311,25 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _running_interactively() -> bool:
+    """Return True when executed inside an IPython / VS Code Interactive session."""
+
+    try:
+        from IPython import get_ipython  # type: ignore
+    except Exception:
+        return False
+    shell = get_ipython()
+    return shell is not None
+
+
 def main():
+    if len(sys.argv) <= 1 and _running_interactively():
+        print(
+            "Interactive session detected — call run_pipeline(...) from the first cell "
+            "instead of invoking the CLI without arguments."
+        )
+        return
+
     args = _parse_args()
     run_pipeline(
         input_path=args.input,

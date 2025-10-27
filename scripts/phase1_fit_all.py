@@ -115,7 +115,22 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _running_interactively() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+    except Exception:
+        return False
+    return get_ipython() is not None
+
+
 def main():
+    if len(sys.argv) <= 1 and _running_interactively():
+        print(
+            "Interactive session detected — call run_batch(...) from the first cell "
+            "instead of invoking the CLI without arguments."
+        )
+        return
+
     args = _parse_args()
     run_batch(outdir=Path(args.outdir), head_trim_min=args.head_trim_min)
 
