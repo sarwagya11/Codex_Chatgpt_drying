@@ -16,8 +16,23 @@ import argparse
 import json
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List
+
+try:
+    _HERE = Path(__file__).resolve()
+except NameError:
+    _HERE = Path.cwd()
+
+if len(_HERE.parents) >= 2:
+    _PROJECT_ROOT = _HERE.parents[1]
+else:
+    _PROJECT_ROOT = _HERE.parent
+
+_SRC_PATH = _PROJECT_ROOT / "src"
+if _SRC_PATH.exists() and str(_SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(_SRC_PATH))
 
 import joblib
 import matplotlib.pyplot as plt

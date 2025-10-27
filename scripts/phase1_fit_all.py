@@ -12,8 +12,23 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import List, Tuple
+
+try:
+    _HERE = Path(__file__).resolve()
+except NameError:
+    _HERE = Path.cwd()
+
+if len(_HERE.parents) >= 2:
+    _PROJECT_ROOT = _HERE.parents[1]
+else:
+    _PROJECT_ROOT = _HERE.parent
+
+_SRC_PATH = _PROJECT_ROOT / "src"
+if _SRC_PATH.exists() and str(_SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(_SRC_PATH))
 
 import pandas as pd
 
@@ -47,7 +62,10 @@ def run_batch(outdir: Path, head_trim_min: float = 0.0) -> pd.DataFrame:
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    root = Path(__file__).resolve().parents[1]
+    try:
+        root = Path(__file__).resolve().parents[1]
+    except NameError:
+        root = Path.cwd()
     datasets = discover_datasets(root)
     results: List[dict] = []
     failures: List[Tuple[str, str]] = []
