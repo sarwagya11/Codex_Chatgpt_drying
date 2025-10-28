@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .pytest_cache/
 phase1_out/
+.venv/
+
+__pycache__/
+phase1_out/
+*.png
+*.joblib
