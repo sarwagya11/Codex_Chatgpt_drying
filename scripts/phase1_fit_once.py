@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, List
 
 # Bootstrap sys.path for interactive usage -----------------------------------
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,9 +22,19 @@ for candidate in (_PROJECT_ROOT, _SRC_ROOT):
     if candidate_str not in sys.path:
         sys.path.insert(0, candidate_str)
 
-from kinetics import MODEL_SPECS, fit_all_models, load_and_preprocess  # noqa: E402
-from kinetics.fitters_phase1 import save_fit_artifacts  # noqa: E402
-from kinetics.preprocess_phase1 import save_preprocess_artifacts  # noqa: E402
+from kinetics import load_and_preprocess  # noqa: E402
+from kinetics.fitters_phase1 import (  # noqa: E402
+    FitResult,
+    ModelSpec,
+    _select_best_result,
+    fit_all_models,
+    save_fit_artifacts,
+)
+from kinetics.models_phase1 import MODEL_SPECS  # noqa: E402
+from kinetics.preprocess_phase1 import (  # noqa: E402
+    PreprocessResult,
+    save_preprocess_artifacts,
+)
 
 
 def run_pipeline(
@@ -43,12 +53,14 @@ def run_pipeline(
     plots_dir = dataset_outdir / "plots"
 
     preprocess = load_and_preprocess(input_path, head_trim_min=head_trim_min)
-    save_preprocess_artifacts(preprocess, plots_dir / "01_mr_raw_vs_iso.png")
+    save_preprocess_artifacts(preprocess, plots_dir, "01_mr_raw_vs_iso")
 
-    results = fit_all_models(preprocess.time_min, preprocess.mr_iso)
-    best = _select_best_result(results)
-    best_spec = next(spec for spec in MODEL_SPECS if spec.name == best.model_name)
-    best_params = [best.params[name] for name in best_spec.param_names]
+    results: List[FitResult] = fit_all_models(preprocess.time_min, preprocess.mr_iso)
+    best: FitResult = _select_best_result(results)
+    best_spec: ModelSpec = next(spec for spec in MODEL_SPECS if spec.name == best.model_name)
+    best_params: Dict[str, float] = {
+        name: float(best.params[name]) for name in best_spec.param_names
+    }
     best_predictions = best_spec.predict(preprocess.time_min, best_params)
     best_residuals = best_predictions - preprocess.mr_iso
 
@@ -71,32 +83,25 @@ def run_pipeline(
             key: best.metrics.get(key)
             for key in ["rmse", "aicc", "bic", "loo_rmse", "sse", "n_obs"]
         },
-        "best_params": best.params,
+        "best_params": {name: best.params.get(name) for name in best.param_names},
         "warnings": best.warnings,
     }
 
-    print(
-        f"Best model for {input_path.name}: {best.model_name} "
-        f"(AICc={best.metrics.get('aicc'):.3f}, LOO-RMSE={best.metrics.get('loo_rmse'):.4f})"
-    )
+    aicc = best.metrics.get("aicc")
+    loo_rmse = best.metrics.get("loo_rmse")
+    summary_line = f"Best model for {input_path.name}: {best.model_name}"
+    if aicc is not None and loo_rmse is not None:
+        summary_line += f" (AICc={aicc:.3f}, LOO-RMSE={loo_rmse:.4f})"
+    if best.warnings:
+        summary_line += f" | warnings: {'; '.join(best.warnings)}"
+    print(summary_line)
 
     return summary
 
 
-def _select_best_result(results: Iterable) -> object:
-    import math
-
-    sorted_results = sorted(
-        results,
-        key=lambda r: (
-            math.inf if not math.isfinite(r.metrics.get("aicc", math.inf)) else r.metrics["aicc"],
-            math.inf if not math.isfinite(r.metrics.get("loo_rmse", math.inf)) else r.metrics["loo_rmse"],
-        ),
-    )
-    return sorted_results[0]
-
-
-def _write_master_rows(master_path: Path, preprocess, results: List) -> None:
+def _write_master_rows(
+    master_path: Path, preprocess: PreprocessResult, results: List[FitResult]
+) -> None:
     import pandas as pd
 
     master_path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,8 +126,8 @@ def _write_master_rows(master_path: Path, preprocess, results: List) -> None:
             "RH_frac": hints.get("RH_frac"),
             "thickness_mm": hints.get("thickness_mm"),
         }
-        for name, value in result.params.items():
-            row[name] = value
+        for name in result.param_names:
+            row[name] = result.params.get(name)
         rows.append(row)
 
     new_df = pd.DataFrame(rows)

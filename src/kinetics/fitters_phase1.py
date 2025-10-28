@@ -6,14 +6,37 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import joblib
 import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
 
-from .models_phase1 import MODEL_SPECS, ModelSpec
+__all__ = [
+    "ModelSpec",
+    "FitResult",
+    "get_model_specs",
+    "fit_all_models",
+    "_select_best_result",
+    "save_fit_artifacts",
+]
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """Description of an empirical drying kinetics model."""
+
+    name: str
+    param_names: List[str]
+    predict: Callable[[np.ndarray, Dict[str, float]], np.ndarray]
+    initializer: Callable[[np.ndarray, np.ndarray], Dict[str, float]]
+    bounds: Dict[str, Tuple[float, float]]
+
+    def bounds_array(self) -> np.ndarray:
+        """Return lower/upper bounds in parameter order for optimisation."""
+
+        ordered = np.array([self.bounds[name] for name in self.param_names], dtype=float)
+        return ordered
 
 
 @dataclass
@@ -21,10 +44,10 @@ class FitResult:
     """Container describing the outcome of fitting a model to MR data."""
 
     model_name: str
+    param_names: List[str]
     params: Dict[str, float]
-    param_stderr: Dict[str, float]
-    param_ci_lower: Dict[str, float]
-    param_ci_upper: Dict[str, float]
+    stderr: Optional[Dict[str, float]]
+    ci95: Optional[Dict[str, Tuple[float, float]]]
     metrics: Dict[str, float]
     success: bool
     message: str
@@ -44,26 +67,62 @@ class FitResult:
             "n_obs": self.metrics.get("n_obs"),
             "warnings": " | ".join(self.warnings) if self.warnings else "",
         }
-        for name, value in self.params.items():
+        for name in self.param_names:
+            value = self.params.get(name)
             row[name] = value
-            row[f"{name}_se"] = self.param_stderr.get(name)
-            row[f"{name}_ci_lower"] = self.param_ci_lower.get(name)
-            row[f"{name}_ci_upper"] = self.param_ci_upper.get(name)
+            if self.stderr and name in self.stderr:
+                row[f"{name}_se"] = self.stderr[name]
+            if self.ci95 and name in self.ci95:
+                lo, hi = self.ci95[name]
+                row[f"{name}_ci_lower"] = lo
+                row[f"{name}_ci_upper"] = hi
         return row
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing helpers
+    from .preprocess_phase1 import PreprocessResult
+
+from .models_phase1 import MODEL_SPECS
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+
+def get_model_specs() -> List[ModelSpec]:
+    """Return the registered model specifications."""
+
+    return list(MODEL_SPECS)
+
+
 def fit_all_models(time: np.ndarray, mr_iso: np.ndarray) -> List[FitResult]:
     """Fit all phase-1 models to the supplied data."""
 
     results: List[FitResult] = []
-    for spec in MODEL_SPECS:
+    for spec in get_model_specs():
         result = _fit_single_model(spec, time, mr_iso)
         results.append(result)
     return results
+
+
+def _select_best_result(results: Iterable[FitResult]) -> FitResult:
+    """Choose the best-fit result using AICc primary, LOO-RMSE tie-breaker."""
+
+    sorted_results = sorted(
+        results,
+        key=lambda r: (
+            _finite_or_inf(r.metrics.get("aicc")),
+            _finite_or_inf(r.metrics.get("loo_rmse")),
+        ),
+    )
+    return sorted_results[0]
+
+
+def _finite_or_inf(value: Optional[float]) -> float:
+    if value is None or not math.isfinite(value):
+        return float("inf")
+    return float(value)
 
 
 # ---------------------------------------------------------------------------
@@ -71,41 +130,42 @@ def fit_all_models(time: np.ndarray, mr_iso: np.ndarray) -> List[FitResult]:
 # ---------------------------------------------------------------------------
 
 def _fit_single_model(spec: ModelSpec, time: np.ndarray, mr: np.ndarray) -> FitResult:
-    bounds = np.array(spec.bounds, dtype=float)
+    bounds = spec.bounds_array()
     lower = bounds[:, 0]
     upper = bounds[:, 1]
 
-    x0 = spec.initializer(time, mr)
-    x0 = np.clip(x0, lower, upper)
+    params0_dict = spec.initializer(time, mr)
+    params0 = _param_dict_to_vector(params0_dict, spec.param_names)
+    params0 = np.clip(params0, lower, upper)
 
-    def residuals(params: np.ndarray) -> np.ndarray:
-        preds = spec.predict(time, params)
+    def residuals(vector: np.ndarray) -> np.ndarray:
+        preds = spec.predict(time, _vector_to_param_dict(vector, spec.param_names))
         return preds - mr
 
     result = least_squares(
         residuals,
-        x0,
+        params0,
         bounds=(lower, upper),
         loss="soft_l1",
         f_scale=0.1,
         max_nfev=5000,
     )
 
-    params = result.x
+    params_vector = result.x
     success = bool(result.success)
     message = str(result.message)
 
-    residual_vec = residuals(params)
+    residual_vec = residuals(params_vector)
     sse = float(np.sum(residual_vec**2))
     n_obs = int(len(time))
-    dof = max(n_obs - len(params), 1)
+    dof = max(n_obs - len(params_vector), 1)
     rmse = float(np.sqrt(sse / n_obs)) if n_obs else float("nan")
-    aic, aicc, bic = _information_criteria(sse, n_obs, len(params))
+    aic, aicc, bic = _information_criteria(sse, n_obs, len(params_vector))
 
-    stderr, ci_lower, ci_upper = _parameter_uncertainty(result, sse, dof, spec)
-    warnings = _collect_warnings(spec, params, result)
+    stderr, ci95 = _parameter_uncertainty(result, sse, dof, spec)
+    warnings = _collect_warnings(spec, params_vector, result)
 
-    loo_rmse = _blocked_loo_rmse(spec, time, mr, params, lower, upper)
+    loo_rmse = _blocked_loo_rmse(spec, time, mr, params_vector, lower, upper)
 
     metrics = {
         "rmse": rmse,
@@ -117,12 +177,14 @@ def _fit_single_model(spec: ModelSpec, time: np.ndarray, mr: np.ndarray) -> FitR
         "n_obs": n_obs,
     }
 
+    params_dict = _vector_to_param_dict(params_vector, spec.param_names)
+
     return FitResult(
         model_name=spec.name,
-        params={name: float(value) for name, value in zip(spec.param_names, params)},
-        param_stderr=stderr,
-        param_ci_lower=ci_lower,
-        param_ci_upper=ci_upper,
+        param_names=list(spec.param_names),
+        params=params_dict,
+        stderr=stderr,
+        ci95=ci95,
         metrics=metrics,
         success=success,
         message=message,
@@ -149,40 +211,35 @@ def _parameter_uncertainty(
     sse: float,
     dof: int,
     spec: ModelSpec,
-) -> tuple[Dict[str, float], Dict[str, float], Dict[str, float]]:
-    stderr: Dict[str, float] = {}
-    ci_lower: Dict[str, float] = {}
-    ci_upper: Dict[str, float] = {}
-
+) -> tuple[Optional[Dict[str, float]], Optional[Dict[str, Tuple[float, float]]]]:
     if result.jac is None or dof <= 0:
-        for name in spec.param_names:
-            stderr[name] = float("nan")
-            ci_lower[name] = float("nan")
-            ci_upper[name] = float("nan")
-        return stderr, ci_lower, ci_upper
+        return None, None
+
+    stderr: Dict[str, float] = {}
+    ci95: Dict[str, Tuple[float, float]] = {}
 
     try:
         jtj = result.jac.T.dot(result.jac)
         cov = np.linalg.inv(jtj) * (sse / dof)
-        for idx, name in enumerate(spec.param_names):
-            variance = float(cov[idx, idx]) if cov.size else float("nan")
-            if variance < 0:
-                variance = float("nan")
-            se = float(np.sqrt(variance)) if math.isfinite(variance) else float("nan")
-            stderr[name] = se
-            if math.isfinite(se):
-                ci_lower[name] = float(result.x[idx] - 1.96 * se)
-                ci_upper[name] = float(result.x[idx] + 1.96 * se)
-            else:
-                ci_lower[name] = float("nan")
-                ci_upper[name] = float("nan")
     except np.linalg.LinAlgError:
-        for name in spec.param_names:
-            stderr[name] = float("nan")
-            ci_lower[name] = float("nan")
-            ci_upper[name] = float("nan")
+        return None, None
 
-    return stderr, ci_lower, ci_upper
+    for idx, name in enumerate(spec.param_names):
+        variance = float(cov[idx, idx]) if cov.size else float("nan")
+        if variance < 0:
+            variance = float("nan")
+        se = float(np.sqrt(variance)) if math.isfinite(variance) else float("nan")
+        if not math.isfinite(se):
+            stderr[name] = float("nan")
+            ci95[name] = (float("nan"), float("nan"))
+            continue
+        stderr[name] = se
+        ci95[name] = (
+            float(result.x[idx] - 1.96 * se),
+            float(result.x[idx] + 1.96 * se),
+        )
+
+    return stderr, ci95
 
 
 def _collect_warnings(
@@ -193,11 +250,12 @@ def _collect_warnings(
         warnings.append("optimizer_failed")
 
     tol = 1e-6
-    for idx, (lo, hi) in enumerate(spec.bounds):
+    for idx, name in enumerate(spec.param_names):
+        lo, hi = spec.bounds[name]
         if abs(params[idx] - lo) <= tol:
-            warnings.append(f"param_{spec.param_names[idx]}_at_lower_bound")
+            warnings.append(f"param_{name}_at_lower_bound")
         if abs(params[idx] - hi) <= tol:
-            warnings.append(f"param_{spec.param_names[idx]}_at_upper_bound")
+            warnings.append(f"param_{name}_at_upper_bound")
 
     return warnings
 
@@ -225,18 +283,29 @@ def _blocked_loo_rmse(
         mr_train = mr[mask]
 
         try:
-            params0 = np.clip(spec.initializer(time_train, mr_train), lower, upper)
+            params0_dict = spec.initializer(time_train, mr_train)
+            params0 = np.clip(
+                _param_dict_to_vector(params0_dict, spec.param_names), lower, upper
+            )
             result = least_squares(
-                lambda p: spec.predict(time_train, p) - mr_train,
+                lambda p: spec.predict(
+                    time_train, _vector_to_param_dict(p, spec.param_names)
+                )
+                - mr_train,
                 params0,
                 bounds=(lower, upper),
                 loss="soft_l1",
                 f_scale=0.1,
                 max_nfev=3000,
             )
-            preds = spec.predict(time[block], result.x)
+            preds = spec.predict(
+                time[block],
+                _vector_to_param_dict(result.x, spec.param_names),
+            )
         except Exception:  # pragma: no cover - safeguard for numerical issues
-            preds = spec.predict(time[block], params)
+            preds = spec.predict(
+                time[block], _vector_to_param_dict(params, spec.param_names)
+            )
 
         block_errors = mr[block] - preds
         errors.extend(block_errors.tolist())
@@ -254,10 +323,18 @@ def _make_blocks(n_obs: int) -> List[np.ndarray]:
     return [idx for idx in indices if idx.size > 0]
 
 
+def _param_dict_to_vector(params: Dict[str, float], param_names: Sequence[str]) -> np.ndarray:
+    return np.array([float(params[name]) for name in param_names], dtype=float)
+
+
+def _vector_to_param_dict(vector: np.ndarray, param_names: Sequence[str]) -> Dict[str, float]:
+    return {name: float(vector[idx]) for idx, name in enumerate(param_names)}
+
+
 def save_fit_artifacts(
     outdir: Path,
     preprocess: "PreprocessResult",
-    results: Sequence[FitResult],
+    results: List[FitResult],
     best_result: FitResult,
     best_predictions: np.ndarray,
     best_residuals: np.ndarray,
@@ -282,7 +359,8 @@ def save_fit_artifacts(
         linewidth=2,
     )
     param_text = ", ".join(
-        f"{name}={best_result.params.get(name, float('nan')):.4f}" for name in best_result.params
+        f"{name}={best_result.params.get(name, float('nan')):.4f}"
+        for name in best_result.param_names
     )
     ax.set_xlabel("Time (min)")
     ax.set_ylabel("Moisture ratio")
@@ -330,7 +408,7 @@ def save_fit_artifacts(
             for k, v in best_result.metrics.items()
             if k in {"rmse", "sse", "aic", "aicc", "bic", "loo_rmse", "n_obs"}
         },
-        "best_params": best_result.params,
+        "best_params": {name: best_result.params.get(name) for name in best_result.param_names},
         "warnings": best_result.warnings,
         "all_models": [r.to_row() for r in results],
         "preprocess": preprocess.to_jsonable(),

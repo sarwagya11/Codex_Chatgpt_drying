@@ -5,13 +5,15 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 plt.switch_backend("Agg")
+
+__all__ = ["PreprocessResult", "load_and_preprocess", "save_preprocess_artifacts"]
 
 
 @dataclass
@@ -23,7 +25,7 @@ class PreprocessResult:
     mr_raw: np.ndarray
     mr_iso: np.ndarray
     head_trim_min: float
-    metadata: Dict[str, object] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def trimmed(self) -> bool:
@@ -75,10 +77,13 @@ def load_and_preprocess(
     )
 
 
-def save_preprocess_artifacts(result: PreprocessResult, plot_path: Path) -> None:
+def save_preprocess_artifacts(
+    result: PreprocessResult, plots_dir: Path, filename_prefix: str
+) -> Path:
     """Write raw vs isotonic MR comparison plot to disk."""
 
-    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = plots_dir / f"{filename_prefix}.png"
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.plot(result.time_min, result.mr_raw, "o", label="MR raw", alpha=0.7)
@@ -92,6 +97,7 @@ def save_preprocess_artifacts(result: PreprocessResult, plot_path: Path) -> None
     fig.tight_layout()
     fig.savefig(plot_path, dpi=200)
     plt.close(fig)
+    return plot_path
 
 
 # ---------------------------------------------------------------------------

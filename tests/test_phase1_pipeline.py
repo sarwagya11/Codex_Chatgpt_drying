@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
 for candidate in (PROJECT_ROOT, SRC_ROOT):
@@ -22,7 +24,7 @@ def _read_json(path: Path) -> dict:
 
 def test_run_pipeline_creates_artifacts(tmp_path: Path) -> None:
     dataset = PROJECT_ROOT / "T_40_v1p1.csv"
-    output_dir = tmp_path / "phase1"
+    output_dir = tmp_path / "phase1_out" / "_test_run"
 
     summary = run_pipeline(dataset, outdir=output_dir)
     dataset_dir = output_dir / dataset.stem
@@ -40,6 +42,11 @@ def test_run_pipeline_creates_artifacts(tmp_path: Path) -> None:
     assert summary_data["best_model"] == summary["best_model"]
     master = output_dir / "phase1_master.csv"
     assert master.exists()
+    master_df = pd.read_csv(master)
+    matching = master_df[
+        (master_df["file"] == dataset.name) & (master_df["model"] == summary["best_model"])
+    ]
+    assert not matching.empty
 
 
 def test_cli_execution_modes(tmp_path: Path) -> None:
@@ -80,5 +87,7 @@ def test_cli_execution_modes(tmp_path: Path) -> None:
 
     master = batch_dir / "phase1_master.csv"
     assert master.exists()
-    for stem in (dataset.stem, dataset_two.stem):
-        assert (batch_dir / stem / "summary.json").exists()
+    master_df = pd.read_csv(master)
+    for ds in (dataset, dataset_two):
+        assert (batch_dir / ds.stem / "summary.json").exists()
+        assert (master_df["file"] == ds.name).any()

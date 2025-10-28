@@ -91,6 +91,32 @@ without manual path adjustments.
 * `fit_results.joblib` – serialized fit objects for reuse.
 * `phase1_master.csv` – master table for downstream Phase-2 mapping.
 
+## Types & interfaces
+
+Core objects are defined in `src/kinetics/fitters_phase1.py` and reused across
+the CLI entry points and tests.
+
+* `ModelSpec`
+  * `name`: canonical model identifier (e.g., `"page_shift"`).
+  * `param_names`: ordered list of parameter names used for optimisation and
+    reporting.
+  * `predict(time_min, params_dict)`: callable producing an MR curve when given
+    time in minutes and a parameter dictionary keyed by `param_names`.
+  * `initializer(time_min, mr_iso)`: generates a parameter dictionary seed for
+    solvers.
+  * `bounds`: mapping of each parameter to `(lower, upper)` optimisation
+    bounds.
+* `FitResult`
+  * `model_name`: matches `ModelSpec.name`.
+  * `param_names`: ordered parameter labels.
+  * `params`: dictionary of fitted parameter values.
+  * `stderr`: optional dictionary of parameter standard errors (if available).
+  * `ci95`: optional dictionary of `(lower, upper)` 95% confidence intervals.
+  * `metrics`: contains `rmse`, `sse`, `aic`, `aicc`, `bic`, `loo_rmse`,
+    and `n_obs`.
+  * `success`, `message`, `warnings`: optimiser diagnostics surfaced to the
+    CLI and written to disk.
+
 ## Troubleshooting
 
 * Ensure SciPy, NumPy, Pandas, Matplotlib, and Joblib are installed in your

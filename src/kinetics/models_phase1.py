@@ -2,55 +2,43 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable, List, Sequence
+from typing import Dict, List
 
 import numpy as np
 
-
-ArrayLike = Sequence[float]
-
-
-@dataclass(frozen=True)
-class ModelSpec:
-    """Description of an empirical drying kinetics model."""
-
-    name: str
-    param_names: Sequence[str]
-    bounds: Sequence[tuple[float, float]]
-    predict: Callable[[np.ndarray, np.ndarray], np.ndarray]
-    initializer: Callable[[np.ndarray, np.ndarray], np.ndarray]
-
-    def clip(self, params: np.ndarray) -> np.ndarray:
-        params = np.asarray(params, dtype=float)
-        clipped = params.copy()
-        for idx, (lo, hi) in enumerate(self.bounds):
-            clipped[idx] = np.clip(clipped[idx], lo, hi)
-        return clipped
+from .fitters_phase1 import ModelSpec
 
 
 # ---------------------------------------------------------------------------
 # Base functions
 # ---------------------------------------------------------------------------
 
-def _page(time: np.ndarray, params: np.ndarray) -> np.ndarray:
-    k, n = params[:2]
+def _page(time: np.ndarray, params: Dict[str, float]) -> np.ndarray:
+    k = float(params["k"])
+    n = float(params["n"])
     return np.exp(-k * np.power(time, n))
 
 
-def _page_shift(time: np.ndarray, params: np.ndarray) -> np.ndarray:
-    k, n, tau = params[:3]
+def _page_shift(time: np.ndarray, params: Dict[str, float]) -> np.ndarray:
+    k = float(params["k"])
+    n = float(params["n"])
+    tau = float(params["tau"])
     shifted = np.maximum(time - tau, 0.0)
     return np.exp(-k * np.power(shifted, n))
 
 
-def _midilli(time: np.ndarray, params: np.ndarray) -> np.ndarray:
-    k, n, b = params[:3]
+def _midilli(time: np.ndarray, params: Dict[str, float]) -> np.ndarray:
+    k = float(params["k"])
+    n = float(params["n"])
+    b = float(params["b"])
     return np.exp(-k * np.power(time, n)) + b * time
 
 
-def _midilli_shift(time: np.ndarray, params: np.ndarray) -> np.ndarray:
-    k, n, b, tau = params[:4]
+def _midilli_shift(time: np.ndarray, params: Dict[str, float]) -> np.ndarray:
+    k = float(params["k"])
+    n = float(params["n"])
+    b = float(params["b"])
+    tau = float(params["tau"])
     shifted = np.maximum(time - tau, 0.0)
     return np.exp(-k * np.power(shifted, n)) + b * shifted
 
@@ -84,31 +72,31 @@ def _linear_regression(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     return slope, intercept
 
 
-def _page_initializer(time: np.ndarray, mr: np.ndarray) -> np.ndarray:
+def _page_initializer(time: np.ndarray, mr: np.ndarray) -> Dict[str, float]:
     k0, n0 = _shared_initial_guess(time, mr)
-    return np.array([k0, n0], dtype=float)
+    return {"k": k0, "n": n0}
 
 
-def _page_shift_initializer(time: np.ndarray, mr: np.ndarray) -> np.ndarray:
+def _page_shift_initializer(time: np.ndarray, mr: np.ndarray) -> Dict[str, float]:
     k0, n0 = _shared_initial_guess(time, mr)
     tau_guess = float(_first_time_below_threshold(time, mr, 0.98))
-    tau_guess = np.clip(tau_guess, 0.0, 10.0)
-    return np.array([k0, n0, tau_guess], dtype=float)
+    tau_guess = float(np.clip(tau_guess, 0.0, 10.0))
+    return {"k": k0, "n": n0, "tau": tau_guess}
 
 
-def _midilli_initializer(time: np.ndarray, mr: np.ndarray) -> np.ndarray:
+def _midilli_initializer(time: np.ndarray, mr: np.ndarray) -> Dict[str, float]:
     k0, n0 = _shared_initial_guess(time, mr)
     slope_guess = _tail_slope(time, mr)
     b0 = float(np.clip(slope_guess, -0.01, 0.0))
-    return np.array([k0, n0, b0], dtype=float)
+    return {"k": k0, "n": n0, "b": b0}
 
 
-def _midilli_shift_initializer(time: np.ndarray, mr: np.ndarray) -> np.ndarray:
+def _midilli_shift_initializer(time: np.ndarray, mr: np.ndarray) -> Dict[str, float]:
     k0, n0 = _shared_initial_guess(time, mr)
     tau_guess = float(_first_time_below_threshold(time, mr, 0.98))
-    tau_guess = np.clip(tau_guess, 0.0, 10.0)
+    tau_guess = float(np.clip(tau_guess, 0.0, 10.0))
     b0 = float(np.clip(_tail_slope(time, mr), -0.01, 0.0))
-    return np.array([k0, n0, b0, tau_guess], dtype=float)
+    return {"k": k0, "n": n0, "b": b0, "tau": tau_guess}
 
 
 def _tail_slope(time: np.ndarray, mr: np.ndarray) -> float:
@@ -132,32 +120,37 @@ def _first_time_below_threshold(time: np.ndarray, mr: np.ndarray, threshold: flo
 MODEL_SPECS: List[ModelSpec] = [
     ModelSpec(
         name="page",
-        param_names=("k", "n"),
-        bounds=((1e-6, 1.0), (0.2, 2.5)),
+        param_names=["k", "n"],
         predict=lambda t, p: np.clip(_page(t, p), 0.0, 1.1),
         initializer=_page_initializer,
+        bounds={"k": (1e-6, 1.0), "n": (0.2, 2.5)},
     ),
     ModelSpec(
         name="page_shift",
-        param_names=("k", "n", "tau"),
-        bounds=((1e-6, 1.0), (0.2, 2.5), (0.0, 10.0)),
+        param_names=["k", "n", "tau"],
         predict=lambda t, p: np.clip(_page_shift(t, p), 0.0, 1.1),
         initializer=_page_shift_initializer,
+        bounds={"k": (1e-6, 1.0), "n": (0.2, 2.5), "tau": (0.0, 10.0)},
     ),
     ModelSpec(
         name="midilli",
-        param_names=("k", "n", "b"),
-        bounds=((1e-6, 1.0), (0.2, 2.5), (-0.01, 0.0)),
+        param_names=["k", "n", "b"],
         predict=lambda t, p: np.clip(_midilli(t, p), 0.0, 1.1),
         initializer=_midilli_initializer,
+        bounds={"k": (1e-6, 1.0), "n": (0.2, 2.5), "b": (-0.01, 0.0)},
     ),
     ModelSpec(
         name="midilli_shift",
-        param_names=("k", "n", "b", "tau"),
-        bounds=((1e-6, 1.0), (0.2, 2.5), (-0.01, 0.0), (0.0, 10.0)),
+        param_names=["k", "n", "b", "tau"],
         predict=lambda t, p: np.clip(_midilli_shift(t, p), 0.0, 1.1),
         initializer=_midilli_shift_initializer,
+        bounds={
+            "k": (1e-6, 1.0),
+            "n": (0.2, 2.5),
+            "b": (-0.01, 0.0),
+            "tau": (0.0, 10.0),
+        },
     ),
 ]
 
-__all__ = ["ModelSpec", "MODEL_SPECS"]
+__all__ = ["MODEL_SPECS"]
