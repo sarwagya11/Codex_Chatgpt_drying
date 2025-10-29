@@ -37,7 +37,8 @@ def run_pipeline(
     outdir: str | Path = "phase1_out",
     head_trim_min: float = 0.0,
 ) -> Dict[str, object]:
-    """Execute preprocessing + model fitting for one dataset."""
+    """Execute the full preprocessing + fitting workflow for one dataset."""
+
     input_path = Path(input_path).expanduser().resolve()
     if not input_path.exists():
         raise FileNotFoundError(f"Input dataset not found: {input_path}")
@@ -79,30 +80,33 @@ def run_pipeline(
     )
 
     # 5) master CSV (append/replace rows for this file)
-    _write_master_rows(outdir / "phase1_master.csv", preprocess, results)
+_write_master_rows(outdir / "phase1_master.csv", preprocess, results)
 
-    # 6) concise console summary
-    aicc = best.metrics.get("aicc")
-    loo = best.metrics.get("loo_rmse")
-    line = f"Best model for {input_path.name}: {best.model_name}"
-    if aicc is not None and loo is not None:
-        line += f" (AICc={aicc:.3f}, LOO-RMSE={loo:.4f})"
-    if best.warnings:
-        line += f" | warnings: {'; '.join(best.warnings)}"
-    print(line)
+# 6) concise console summary
+aicc = best.metrics.get("aicc")
+loo = best.metrics.get("loo_rmse")
+line = f"Best model for {input_path.name}: {best.model_name}"
+if aicc is not None and loo is not None:
+    line += f" (AICc={aicc:.3f}, LOO-RMSE={loo:.4f})"
+if best.warnings:
+    line += f" | warnings: {'; '.join(best.warnings)}"
+print(line)
 
-    return {
-        "input": str(input_path),
-        "output_dir": str(dataset_outdir.resolve()),
-        "best_model": best.model_name,
-        "best_metrics": {
-            k: best.metrics.get(k)
-            for k in ["rmse", "aicc", "bic", "loo_rmse", "sse", "n_obs"]
-        },
-        "best_params": {n: best.params.get(n) for n in best.param_names},
-        "warnings": best.warnings,
-    }
+summary = {
+    "input": str(input_path),
+    "output_dir": str(dataset_outdir.resolve()),
+    "best_model": best.model_name,
+    "best_metrics": {
+        k: best.metrics.get(k)
+        for k in ["rmse", "aicc", "bic", "loo_rmse", "sse", "n_obs"]
+    },
+    "best_params": {
+        n: best.params.get(n) for n in best.param_names
+    },
+    "warnings": best.warnings,
+}
 
+return summary
 
 def _write_master_rows(
     master_path: Path, preprocess: PreprocessResult, results: List[FitResult]
@@ -132,16 +136,21 @@ def _write_master_rows(
             "thickness_mm": hints.get("thickness_mm"),
         }
         for name in res.param_names:
-            row[name] = res.params.get(name)
+             row[name] = res.params.get(name)
+            
         rows.append(row)
 
     new_df = pd.DataFrame(rows)
 
     if master_path.exists():
-        old = pd.read_csv(master_path)
-        # drop any existing (file, model) combos before appending new
-        mask = ~((old["file"] == preprocess.source_path.name) & old["model"].isin(new_df["model"]))
-        master_df = pd.concat([old[mask], new_df], ignore_index=True)
+        master_df = pd.read_csv(master_path)
+        master_df = master_df[
+            ~(
+                (master_df["file"] == preprocess.source_path.name)
+                & master_df["model"].isin(new_df["model"])
+            )
+        ]
+        master_df = pd.concat([master_df, new_df], ignore_index=True)
     else:
         master_df = new_df
 
@@ -149,21 +158,23 @@ def _write_master_rows(
 
 
 def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Run phase-1 drying kinetics on one dataset."
+    parser = argparse.ArgumentParser(description="Run phase-1 drying kinetics on one dataset.")
+    parser.add_argument("--input", required=True, help="Path to the input CSV/XLSX dataset.")
+    parser.add_argument(
+        "--outdir",
+        default="phase1_out",
+        help="Directory for phase-1 outputs.",
     )
-    parser.add_argument("--input", required=True, help="Path to input CSV/XLSX.")
-    parser.add_argument("--outdir", default="phase1_out", help="Output directory.")
     parser.add_argument(
         "--head_trim_min",
         type=float,
         default=0.0,
         help="Trim leading minutes before fitting.",
     )
+
     args = parser.parse_args(argv)
     run_pipeline(args.input, outdir=args.outdir, head_trim_min=args.head_trim_min)
     return 0
-
 
 if __name__ == "__main__":  # CLI entry point
     raise SystemExit(main())
@@ -171,10 +182,10 @@ if __name__ == "__main__":  # CLI entry point
 
 # %% Quick-start (VS Code Interactive)
 # Adjust paths as needed, then click "Run Cell" on this block only.
-from scripts.phase1_fit_once import run_pipeline
+#from scripts.phase1_fit_once import run_pipeline
 
-run_pipeline(
-    input_path=r"D:\Masters\RQ5\Codex_chatgpt\T_40_v1p1.csv",
-    outdir=r"D:\Masters\RQ5\Codex_chatgpt\phase1_out",
-    head_trim_min=0.0,
-)
+#run_pipeline(
+ #   input_path=r"D:\Masters\RQ5\Codex_chatgpt\T_40_v1p1.csv",
+ #   outdir=r"D:\Masters\RQ5\Codex_chatgpt\phase1_out",
+ #   head_trim_min=0.0,
+#)
