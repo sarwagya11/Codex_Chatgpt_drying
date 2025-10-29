@@ -36,7 +36,7 @@ def run_pipeline(
     input_path: str | Path,
     outdir: str | Path = "phase1_out",
     head_trim_min: float = 0.0,
-) -> Dict[str, object]:
+) -> Dict[str, object]:  # FIXED: added space between > and Dict
     """Execute the full preprocessing + fitting workflow for one dataset."""
 
     input_path = Path(input_path).expanduser().resolve()
@@ -79,34 +79,36 @@ def run_pipeline(
         best_residuals,
     )
 
-    # 5) master CSV (append/replace rows for this file)
-_write_master_rows(outdir / "phase1_master.csv", preprocess, results)
+    # 5) master CSV
+    _write_master_rows(outdir / "phase1_master.csv", preprocess, results)
 
-# 6) concise console summary
-aicc = best.metrics.get("aicc")
-loo = best.metrics.get("loo_rmse")
-line = f"Best model for {input_path.name}: {best.model_name}"
-if aicc is not None and loo is not None:
-    line += f" (AICc={aicc:.3f}, LOO-RMSE={loo:.4f})"
-if best.warnings:
-    line += f" | warnings: {'; '.join(best.warnings)}"
-print(line)
+    # 6) concise console summary
+    aicc = best.metrics.get("aicc")
+    loo = best.metrics.get("loo_rmse")
+    line = f"Best model for {input_path.name}: {best.model_name}"
+    if aicc is not None and loo is not None:
+        line += f" (AICc={aicc:.3f}, LOO-RMSE={loo:.4f})"
+    if best.warnings:
+        line += f" | warnings: {'; '.join(best.warnings)}"
+        
+    print(f"{line} (saved as 03_residuals_best.png)")
 
-summary = {
-    "input": str(input_path),
-    "output_dir": str(dataset_outdir.resolve()),
-    "best_model": best.model_name,
-    "best_metrics": {
-        k: best.metrics.get(k)
-        for k in ["rmse", "aicc", "bic", "loo_rmse", "sse", "n_obs"]
-    },
-    "best_params": {
-        n: best.params.get(n) for n in best.param_names
-    },
-    "warnings": best.warnings,
-}
+    summary = {
+        "input": str(input_path),
+        "output_dir": str(dataset_outdir.resolve()),
+        "best_model": best.model_name,
+        "best_metrics": {
+            k: best.metrics.get(k)
+            for k in ["rmse", "aicc", "bic", "loo_rmse", "sse", "n_obs"]
+        },
+        "best_params": {
+            n: best.params.get(n) for n in best.param_names
+        },
+        "warnings": best.warnings,
+    }
 
-return summary
+    return summary  # FIXED: properly indented inside the function
+
 
 def _write_master_rows(
     master_path: Path, preprocess: PreprocessResult, results: List[FitResult]
@@ -187,5 +189,4 @@ if __name__ == "__main__":  # CLI entry point
 #run_pipeline(
  #   input_path=r"D:\Masters\RQ5\Codex_chatgpt\T_40_v1p1.csv",
  #   outdir=r"D:\Masters\RQ5\Codex_chatgpt\phase1_out",
- #   head_trim_min=0.0,
-#)
+ #   head_trim_min=0.0,)

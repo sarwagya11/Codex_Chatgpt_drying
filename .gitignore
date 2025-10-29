@@ -1,5 +1,9 @@
+# .gitignore
+.venv/
 __pycache__/
 *.pyc
-.pytest_cache/
-phase1_out/
+*.png
+*.csv
 outputs/
+phase1_out/
+*.json
