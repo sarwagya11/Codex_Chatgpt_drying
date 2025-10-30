@@ -7,3 +7,9 @@ __pycache__/
 outputs/
 phase1_out/
 *.json
+tore --staged
+outputs/*
+!outputs/recursive_split/
+
+outputs/recursive_split/*
+!outputs/recursive_split/summary_index.json
