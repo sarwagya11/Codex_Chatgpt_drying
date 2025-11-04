@@ -278,3 +278,74 @@ def _json_safe(value):  # type: ignore[no-untyped-def]
     except Exception:  # pragma: no cover - numpy may be unavailable in rare envs
         pass
     return value
+
+# ------------------------------------------------------------------------------
+# CHANGE: Additional utilities for Phase 2 segment handling and continuity checks
+# ------------------------------------------------------------------------------
+
+def extract_time_mr_series(
+    input_path: Path | str,
+    head_trim_min: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Load and clean time and MR arrays, ensuring strict monotonicity.
+
+    Returns:
+        time: np.ndarray
+        mr: np.ndarray
+        flags: dict with info on duplicates and monotonicity
+    """
+    result = load_and_preprocess(input_path, head_trim_min)
+    time = np.asarray(result.time_min, dtype=float)
+    mr = np.asarray(result.mr_iso, dtype=float)
+
+    flags = {
+        "source": str(result.source_path),
+        "n_raw": len(time),
+        "had_duplicates": False,
+        "had_nonmonotonic": False,
+    }
+
+    # Drop duplicates
+    df = pd.DataFrame({"time": time, "mr": mr})
+    df = df.drop_duplicates(subset="time", keep="first")
+    time_clean = df["time"].to_numpy()
+    mr_clean = df["mr"].to_numpy()
+    if len(time_clean) < flags["n_raw"]:
+        flags["had_duplicates"] = True
+
+    # Check monotonicity
+    if np.any(np.diff(time_clean) <= 0):
+        flags["had_nonmonotonic"] = True
+        raise ValueError(f"Non-monotonic time detected in {input_path}")
+
+    flags["n_clean"] = len(time_clean)
+    return time_clean, mr_clean, flags
+
+
+def segment_mr_bounds(
+    time: np.ndarray, mr: np.ndarray, t_start: float, t_end: float
+) -> tuple[float, float]:
+    """Get MR values at segment start and end using slicing."""
+    if t_end <= t_start:
+        raise ValueError(f"Invalid segment bounds: t_start={t_start}, t_end={t_end}")
+    mask = (time >= t_start) & (time <= t_end + 1e-8)
+    if not np.any(mask):
+        raise ValueError("Segment has no points within bounds.")
+    return float(mr[mask][0]), float(mr[mask][-1])
+
+
+def count_monotonic_violations(mr_pred: np.ndarray) -> int:
+    """Count where MR increases instead of decreases."""
+    return int(np.sum(np.diff(mr_pred) > 0.0))
+
+
+def apply_continuity_rescale(
+    mr_pred: np.ndarray,
+    prev_end_mr: float = 1.0,
+    normalize_from: float = 1.0,
+) -> np.ndarray:
+    """Scale MR segment to start from previous segment's end."""
+    if not np.isfinite(prev_end_mr) or prev_end_mr <= 0:
+        raise ValueError("Invalid previous MR for continuity.")
+    scale = prev_end_mr / normalize_from
+    return np.clip(mr_pred * scale, 0.0, 1.1)

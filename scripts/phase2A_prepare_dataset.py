@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Tuple
+from typing import Any, Dict, Iterable, Iterator, Tuple
 
 import pandas as pd
 
@@ -42,19 +42,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-path",
         type=Path,
-        default=_PROJECT_ROOT
-        / "outputs"
-        / "phase2"
-        / "segments_dataset.csv",
+        default=_PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv",
         help="Destination CSV for the assembled segment dataset.",
     )
     return parser.parse_args()
 
 
-def iter_leaf_segments(tree: Dict[str, object]) -> Iterator[Tuple[Dict[str, object], int, str]]:
+def iter_leaf_segments(tree: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], int, str]]:
     """Yield leaf nodes from the recursive split tree."""
-
-    stack: list[Tuple[Dict[str, object], int, str]] = [(tree, 0, "0")]
+    stack: list[Tuple[Dict[str, Any], int, str]] = [(tree, 0, "0")]
     while stack:
         node, depth, path = stack.pop()
         children = node.get("children") if isinstance(node, dict) else None
@@ -82,7 +78,7 @@ def main() -> None:
         if raw_input is None:
             continue
 
-        resolved_path = resolve_dataset_path(raw_input, args.data_root)
+        resolved_path = resolve_dataset_path(str(raw_input), args.data_root)
         head_trim = float(dataset_entry.get("head_trim_min", default_head_trim))
         preprocess = load_and_preprocess(resolved_path, head_trim)
         hints = preprocess.metadata.get("hints", {})
@@ -97,14 +93,23 @@ def main() -> None:
             "thickness": hints.get("thickness_mm"),
         }
 
+        time_full = pd.Series(preprocess.time_min)  # Ensured to be a Series
+
         tree = dataset_entry.get("tree")
         if not isinstance(tree, dict):
             continue
 
         for leaf_idx, (node, depth, path) in enumerate(iter_leaf_segments(tree)):
             params = node.get("params", {}) if isinstance(node, dict) else {}
-            t_start = float(node.get("t_start", float("nan")))
-            t_end = float(node.get("t_end", float("nan")))
+            t_start = float(node.get("t_start") or float("nan"))
+            t_end = float(node.get("t_end") or float("nan"))
+
+            # CHANGE: Check monotonicity of time in each segment window
+            time_segment = time_full[(time_full >= t_start) & (time_full <= t_end)].drop_duplicates().sort_values()
+            time_deltas = time_segment.diff().dropna()
+            if not (time_deltas > 0).all():
+                print(f"[WARN] Non-monotonic or duplicate time values in segment {resolved_path.name} {path}")
+
             record = {
                 **feature_values,
                 "segment_index": leaf_idx,

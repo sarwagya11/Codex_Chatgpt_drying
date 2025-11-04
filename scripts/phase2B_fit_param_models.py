@@ -89,7 +89,7 @@ def make_estimators() -> Dict[str, Pipeline]:
         ),
     }
 
-    if importlib.util.find_spec("xgboost") is not None:  # pragma: no cover - optional dependency
+    if importlib.util.find_spec("xgboost") is not None:  # Optional dependency
         from xgboost import XGBRegressor  # type: ignore
 
         estimators["XGBoost"] = Pipeline(
@@ -162,7 +162,7 @@ def evaluate_models(
                     "r2": "r2",
                 },
                 cv=cv,
-                n_jobs=None,
+                n_jobs=-1,
                 error_score="raise",
             )
             rmse = -scores["test_neg_root_mean_squared_error"]
@@ -210,7 +210,6 @@ def main() -> None:
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
     estimators = make_estimators()
-
     metrics_records: list[dict] = []
 
     for target in ("k", "n", "b"):
@@ -223,6 +222,8 @@ def main() -> None:
         y_valid = y[mask]
 
         use_transform = target == "b"
+
+        print(f"\n[Phase2B] Training regressors for {target.upper()}...")
 
         best_name, results = evaluate_models(
             X,
@@ -248,15 +249,16 @@ def main() -> None:
             "target": target,
             "target_transform": "signed_log1p" if use_transform else "identity",
         }
+
         model_path = models_dir / f"{target}_model.pkl"
         dump(artifact, model_path)
-        print(f"Saved best model for {target} to {model_path}")
+        print(f"[Phase2B] Saved best model for {target.upper()} to {model_path}")
 
     metrics_df = pd.DataFrame(metrics_records)
     metrics_path = metrics_dir / "model_performance.csv"
     metrics_df.sort_values(["parameter", "mean_rmse"], inplace=True)
     metrics_df.to_csv(metrics_path, index=False)
-    print(f"Wrote metrics summary to {metrics_path}")
+    print(f"[Phase2B] Wrote CV metrics to {metrics_path}")
 
 
 if __name__ == "__main__":
