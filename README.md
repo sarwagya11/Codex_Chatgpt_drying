@@ -124,3 +124,55 @@ the CLI entry points and tests.
 * If you add new modules, confirm they live under `src/` so the provided
   `PYTHONPATH` picks them up automatically.
 * Use the `--head_trim_min` flag if early-time noise impacts the fits.
+
+<!-- # CHANGE: Added Phase 2 pipeline documentation -->
+## Phase-2 Modelling & Reconstruction
+
+Phase 2 extends the repository with automated scripts for segment-level dataset
+preparation, parameter regression, prediction, and MR reconstruction. The
+workflow is orchestrated by the scripts in `scripts/phase2A`–`phase2D`, each of
+which now shares a common configuration/ logging layer and produces structured
+diagnostics.
+
+### Quick start
+
+1. Prepare the phase-2 segment dataset:
+   ```bash
+   python scripts/phase2A_prepare_dataset.py \
+     --summary-index outputs/recursive_split/summary_index.json \
+     --data-root data \
+     --output-path outputs/phase2/segments_dataset.csv
+   ```
+2. Fit parameter regressors:
+   ```bash
+   python scripts/phase2B_fit_param_models.py \
+     --segments-csv outputs/phase2/segments_dataset.csv \
+     --models-dir outputs/phase2/models \
+     --metrics-path outputs/model_performance.csv
+   ```
+3. Generate parameter predictions and continuity diagnostics:
+   ```bash
+   python scripts/phase2C_predict_params.py \
+     --input-csv outputs/phase2/segments_dataset.csv \
+     --models-dir outputs/phase2/models \
+     --output-path outputs/phase2/predicted_params.csv
+   ```
+4. Reconstruct MR curves and plots:
+   ```bash
+   python scripts/phase2D_reconstruct_mr.py \
+     --predictions-csv outputs/phase2/predicted_params.csv \
+     --reconstructed-csv outputs/reconstructed_mr.csv \
+     --plots-dir outputs/plots \
+     --diagnostics-dir outputs/diagnostics
+   ```
+
+Each script accepts `--config` to supply JSON/YAML overrides (e.g., alternate
+paths, logging levels, thresholds). Diagnostics are consolidated under
+`outputs/diagnostics/`, and a canonical reconstruction plot is emitted to
+`outputs/plots/reconstruction_plot.png`.
+
+### One-shot execution
+
+Invoke `run_all.sh` to execute the full Phase 2 pipeline sequentially. The
+script forwards any `--config` path supplied via `PHASE2_CONFIG` environment
+variable and streams logs to `outputs/logs/`.
