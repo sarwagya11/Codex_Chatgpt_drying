@@ -23,7 +23,7 @@ def _read_json(path: Path) -> dict:
 
 
 def test_run_pipeline_creates_artifacts(tmp_path: Path) -> None:
-    dataset = PROJECT_ROOT / "T_40_v1p1.csv"
+    dataset = PROJECT_ROOT / "data" / "T_40_v1p1.csv"  # CHANGE: Use data directory
     output_dir = tmp_path / "phase1_out" / "_test_run"
 
     summary = run_pipeline(dataset, outdir=output_dir)
@@ -50,8 +50,8 @@ def test_run_pipeline_creates_artifacts(tmp_path: Path) -> None:
 
 
 def test_cli_execution_modes(tmp_path: Path) -> None:
-    dataset = PROJECT_ROOT / "T_40_v1p1.csv"
-    dataset_two = PROJECT_ROOT / "T_45_v1p1.csv"
+    dataset = PROJECT_ROOT / "data" / "T_40_v1p1.csv"  # CHANGE: Use data directory
+    dataset_two = PROJECT_ROOT / "data" / "T_45_v1p1.csv"  # CHANGE: Use data directory
 
     once_dir = tmp_path / "cli_once"
     batch_dir = tmp_path / "cli_batch"
@@ -71,7 +71,7 @@ def test_cli_execution_modes(tmp_path: Path) -> None:
 
     assert (once_dir / dataset.stem / "summary.json").exists()
 
-    pattern = str(dataset.parent / "T_4*_v1p1.csv")
+    pattern = str((PROJECT_ROOT / "data") / "T_4*_v1p1.csv")  # CHANGE: Batch glob uses data directory
     subprocess.check_call(
         [
             sys.executable,
