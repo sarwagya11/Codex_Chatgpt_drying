@@ -193,8 +193,8 @@ def _evaluate_residual_tests(
     residuals: np.ndarray,
     smoothed: np.ndarray,
     residual_r2: float,
-) -> Dict[str, object]:
-    diagnostics: Dict[str, object] = {}
+) -> Dict[str, Any]:
+    diagnostics: Dict[str, Any] = {}
     if residuals.size == 0:
         diagnostics.update(
             {
@@ -283,15 +283,15 @@ class SegmentNode:
     residual_r2: Optional[float] = None
     index_start: Optional[int] = None
     index_end: Optional[int] = None
-    residual_diagnostics: Dict[str, object] = field(default_factory=dict)
-    candidate_metrics: List[Dict[str, object]] = field(default_factory=list)
+    residual_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    candidate_metrics: List[Dict[str, Any]] = field(default_factory=list)
     children: List["SegmentNode"] = field(default_factory=list)
 
     def is_leaf(self) -> bool:
         return not self.children
 
-    def to_dict(self) -> Dict[str, object]:
-        payload: Dict[str, object] = {
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
             "t_start": self.t_start,
             "t_end": self.t_end,
             "n_obs": self.n_obs,
@@ -331,7 +331,7 @@ class SegmentNode:
             payload["children"] = [child.to_dict() for child in self.children]
         if self.candidate_metrics:
             payload["candidates"] = [
-                cast(Dict[str, object], _sanitize_mapping(entry))
+                cast(Dict[str, Any], _sanitize_mapping(entry))
                 for entry in self.candidate_metrics
             ]
         return payload
@@ -484,7 +484,7 @@ def recursive_split_segment(
         improvement = _relative_improvement(baseline_rmse, cand.combined_rmse)
         delta_rmse = baseline_rmse - cand.combined_rmse
         delta_aicc = baseline_aicc - cand.combined_aicc
-        candidate_payload: Dict[str, object] = {
+        candidate_payload: Dict[str, Any] = {
             "t_split": float(cand.t_split),
             "delta_rmse": float(delta_rmse),
             "delta_aicc": float(delta_aicc),
@@ -1116,7 +1116,7 @@ def _write_leaf_csv(path: Path, leaves: Sequence[SegmentNode]) -> None:
             writer.writerow(row)
 
 
-def _write_pre_post_table(path: Path, rows: Sequence[Dict[str, object]]) -> None:
+def _write_pre_post_table(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     import csv
 
     if not rows:
@@ -1184,7 +1184,7 @@ def run_recursive_split(
     try_page_at_root: bool,
     max_iter: int,
     shape_evidence_weight: float,
-) -> Dict[str, object]:
+) -> Dict[str, Any]:
     preprocess = load_and_preprocess(input_path, head_trim_min=head_trim_min)
     time = preprocess.time_min
     mr = preprocess.mr_iso
@@ -1502,19 +1502,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         type=float,
         default=0.03,
         help="Relative RMSE improvement required at the root (child segments use half).",
-    )
-    parser.add_argument(
-        "--min-points-leaf",
-        dest="min_points_leaf",
-        type=int,
-        default=12,
-        help="Minimum observations permitted for any leaf segment.",
-    )
-    parser.add_argument(
-        "--min-rel-improvement",
-        dest="min_rel_improvement",
-        type=float,
-        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--improvement_threshold",
