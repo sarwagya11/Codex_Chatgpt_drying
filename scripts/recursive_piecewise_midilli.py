@@ -9,7 +9,7 @@ import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -142,10 +142,17 @@ class SegmentNode:
         if self.candidate_metrics:
             cleaned: List[Dict[str, object]] = []
             for entry in self.candidate_metrics:
-                cleaned_entry = {
-                    key: (_safe_float(value) if isinstance(value, float) else value)
-                    for key, value in entry.items()
-                }
+                cleaned_entry = cast(
+                    Dict[str, object],
+                    {
+                        key: (
+                            _safe_float(value)
+                            if isinstance(value, (int, float, np.floating))
+                            else value
+                        )
+                        for key, value in entry.items()
+                    },
+                )
                 cleaned.append(cleaned_entry)
             payload["candidates"] = cleaned
         return payload
@@ -905,10 +912,15 @@ def run_recursive_split(
                 "Skipping root spec %s due to fit failure: %s", candidate_spec.name, exc
             )
             continue
-        aicc = float(fit.metrics.get("aicc", float("inf")))
-        root_scores[candidate_spec.name] = aicc
-        if math.isfinite(aicc) and aicc < best_score:
-            best_score = aicc
+        aicc_value = _safe_float(fit.metrics.get("aicc"))
+        if aicc_value is None:
+            logger.debug(
+                "Skipping root spec %s due to non-finite AICc", candidate_spec.name
+            )
+            continue
+        root_scores[candidate_spec.name] = aicc_value
+        if math.isfinite(aicc_value) and aicc_value < best_score:
+            best_score = aicc_value
             best_spec = candidate_spec
 
     if best_spec is None:
