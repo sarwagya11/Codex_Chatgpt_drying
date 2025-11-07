@@ -1453,6 +1453,7 @@ def run_recursive_split(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Recursive residual analysis for Midilli model with up to two splits.",
+        conflict_handler="resolve",
     )
     parser.add_argument(
         "--data-dir",
