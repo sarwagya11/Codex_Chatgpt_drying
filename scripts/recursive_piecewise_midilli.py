@@ -69,6 +69,41 @@ def _safe_float(value: Optional[float | int | np.floating]) -> Optional[float]:
     return numeric
 
 
+def _segment_stats(result: FitResult) -> Optional[Tuple[int, float, int]]:
+    """Return (n_obs, sse, k) for a fitted segment or ``None`` if unavailable."""
+
+    metrics = result.metrics or {}
+
+    n_obs_val = metrics.get("n_obs")
+    n_obs = _safe_float(n_obs_val if isinstance(n_obs_val, (int, float, np.floating)) else None)
+    if n_obs is None:
+        return None
+    n_obs_int = int(n_obs)
+    if n_obs_int <= 0:
+        return None
+
+    sse_val = metrics.get("sse")
+    sse = _safe_float(sse_val if isinstance(sse_val, (int, float, np.floating)) else None)
+    if sse is None:
+        rmse_val = metrics.get("rmse")
+        rmse = _safe_float(rmse_val if isinstance(rmse_val, (int, float, np.floating)) else None)
+        if rmse is None:
+            return None
+        sse = float(max(rmse, 0.0) ** 2 * n_obs_int)
+    if not math.isfinite(sse):
+        return None
+    if sse < 0:
+        sse = 0.0
+
+    k_val = metrics.get("k")
+    k = _safe_float(k_val if isinstance(k_val, (int, float, np.floating)) else None)
+    if k is None:
+        k = float(len(result.params))
+    k_int = max(int(k), 0)
+
+    return n_obs_int, float(sse), k_int
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -304,6 +339,20 @@ def recursive_split_segment(
             "combined_rmse": float(cand.combined_rmse),
             "combined_aicc": float(cand.combined_aicc),
         }
+        left_stats = _segment_stats(cand.left_result)
+        right_stats = _segment_stats(cand.right_result)
+        if left_stats is not None and right_stats is not None:
+            n_left, _, k_left = left_stats
+            n_right, _, k_right = right_stats
+            candidate_payload.update(
+                {
+                    "n_left": float(n_left),
+                    "n_right": float(n_right),
+                    "k_left": float(k_left),
+                    "k_right": float(k_right),
+                    "k_total": float(k_left + k_right),
+                }
+            )
         node.candidate_metrics.append(candidate_payload)
         logger.debug(
             "%sCAND t=%.3f | ΔRMSE=%.4f ΔAICc=%.2f gap=%.4f score=%.2f",
@@ -570,21 +619,41 @@ def _lowess_candidate_indices(
 
 
 def _combine_metrics(left: FitResult, right: FitResult) -> Tuple[float, float]:
-    n_left = left.metrics.get("n_obs", 0) or 0
-    n_right = right.metrics.get("n_obs", 0) or 0
-    if not n_left or not n_right:
+    left_stats = _segment_stats(left)
+    right_stats = _segment_stats(right)
+    if left_stats is None or right_stats is None:
         return float("inf"), float("inf")
 
-    sse_left = left.metrics.get("sse", float("inf"))
-    sse_right = right.metrics.get("sse", float("inf"))
-    if not math.isfinite(sse_left) or not math.isfinite(sse_right):
+    n_left, sse_left, k_left = left_stats
+    n_right, sse_right, k_right = right_stats
+
+    combined_n = n_left + n_right
+    if combined_n <= 0:
         return float("inf"), float("inf")
 
-    combined_rmse = math.sqrt((sse_left + sse_right) / (n_left + n_right))
+    combined_sse = sse_left + sse_right
+    if not math.isfinite(combined_sse) or combined_sse < 0:
+        return float("inf"), float("inf")
 
-    aicc_left = left.metrics.get("aicc", float("inf"))
-    aicc_right = right.metrics.get("aicc", float("inf"))
-    combined_aicc = float(aicc_left + aicc_right)
+    combined_rmse = math.sqrt(max(combined_sse, 0.0) / combined_n)
+
+    if combined_sse <= 0:
+        return combined_rmse, float("inf")
+
+    combined_k = k_left + k_right
+    if combined_k < 0:
+        combined_k = 0
+
+    if combined_n <= combined_k + 1:
+        return combined_rmse, float("inf")
+
+    mse = combined_sse / combined_n
+    if mse <= 0:
+        return combined_rmse, float("inf")
+
+    aic = combined_n * math.log(mse) + 2 * combined_k
+    correction = (2 * combined_k * (combined_k + 1)) / (combined_n - combined_k - 1)
+    combined_aicc = aic + correction
 
     return combined_rmse, combined_aicc
 

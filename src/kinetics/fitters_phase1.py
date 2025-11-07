@@ -175,6 +175,7 @@ def _fit_single_model(spec: ModelSpec, time: np.ndarray, mr: np.ndarray) -> FitR
         "bic": bic,
         "loo_rmse": loo_rmse,
         "n_obs": n_obs,
+        "k": float(len(params_vector)),
     }
 
     params_dict = _vector_to_param_dict(params_vector, spec.param_names)
