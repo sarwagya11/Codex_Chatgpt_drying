@@ -57,7 +57,7 @@ def _temporary_max_iter(max_iter: int):
         fitters_phase1.least_squares = original  # type: ignore[assignment]
 
 
-def _safe_float(value: Optional[float]) -> Optional[float]:
+def _safe_float(value: Optional[float | int | np.floating]) -> Optional[float]:
     if value is None:
         return None
     try:
@@ -227,20 +227,29 @@ def recursive_split_segment(
         leaf_min=config.min_points_leaf,
     )
 
+    rmse_val = _safe_float(fit.metrics.get("rmse"))
+    aicc_val = _safe_float(fit.metrics.get("aicc"))
+    if rmse_val is None or aicc_val is None:
+        raise RuntimeError("Fit did not provide finite RMSE/AICc metrics")
+
+    params: Dict[str, float] = {}
+    for name, value in fit.params.items():
+        numeric = _safe_float(
+            value if isinstance(value, (int, float, np.floating)) else None
+        )
+        if numeric is None:
+            raise RuntimeError("Fit returned non-finite parameter value")
+        params[name] = float(numeric)
+
     node = SegmentNode(
         t_start=float(time[0]),
         t_end=float(time[-1]),
         n_obs=int(time.size),
-        rmse=float(fit.metrics.get("rmse", math.nan)),
-        aicc=float(fit.metrics.get("aicc", math.nan)),
-        params={
-            name: (
-                _safe_float(value) if isinstance(value, (int, float)) else value
-            )
-            for name, value in fit.params.items()
-        },
+        rmse=rmse_val,
+        aicc=aicc_val,
+        params=params,
         model_type=spec.name,
-        baseline_aicc=float(fit.metrics.get("aicc", math.nan)),
+        baseline_aicc=aicc_val,
         residual_r2=residual_r2,
         index_start=int(indices[0]) if indices.size else None,
         index_end=int(indices[-1]) if indices.size else None,
@@ -278,15 +287,15 @@ def recursive_split_segment(
         improvement = _relative_improvement(baseline_rmse, cand.combined_rmse)
         delta_rmse = baseline_rmse - cand.combined_rmse
         delta_aicc = baseline_aicc - cand.combined_aicc
-        candidate_payload = {
-            "t_split": _safe_float(cand.t_split),
-            "delta_rmse": _safe_float(delta_rmse),
-            "delta_aicc": _safe_float(delta_aicc),
-            "rel_improvement": _safe_float(improvement),
-            "join_gap": _safe_float(cand.join_gap),
-            "penalized_score": _safe_float(cand.penalized_score),
-            "combined_rmse": _safe_float(cand.combined_rmse),
-            "combined_aicc": _safe_float(cand.combined_aicc),
+        candidate_payload: Dict[str, float] = {
+            "t_split": float(cand.t_split),
+            "delta_rmse": float(delta_rmse),
+            "delta_aicc": float(delta_aicc),
+            "rel_improvement": float(improvement),
+            "join_gap": float(cand.join_gap),
+            "penalized_score": float(cand.penalized_score),
+            "combined_rmse": float(cand.combined_rmse),
+            "combined_aicc": float(cand.combined_aicc),
         }
         node.candidate_metrics.append(candidate_payload)
         logger.debug(
@@ -610,9 +619,9 @@ def _fit_with_spec(
         raise RuntimeError(result.message)
 
     metrics = result.metrics or {}
-    rmse = metrics.get("rmse")
-    aicc = metrics.get("aicc")
-    if not (math.isfinite(rmse) and math.isfinite(aicc)):
+    rmse = _safe_float(metrics.get("rmse"))
+    aicc = _safe_float(metrics.get("aicc"))
+    if rmse is None or aicc is None:
         raise RuntimeError("Invalid metrics (rmse/aicc) from fit")
 
     for warning in result.warnings:
@@ -620,11 +629,10 @@ def _fit_with_spec(
             raise RuntimeError(f"Fit saturated parameter bounds: {warning}")
 
     for value in result.params.values():
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            raise RuntimeError("Fit returned non-numeric parameter value")
-        if not math.isfinite(numeric):
+        numeric = _safe_float(
+            value if isinstance(value, (int, float, np.floating)) else None
+        )
+        if numeric is None:
             raise RuntimeError("Fit returned non-finite parameter value")
 
     return result
@@ -672,15 +680,16 @@ def _min_points_for_depth(depth: int, *, root_min: int, leaf_min: int) -> int:
 def _collect_split_details(node: SegmentNode) -> List[Dict[str, float]]:
     details: List[Dict[str, float]] = []
     if node.split_time is not None:
-        details.append(
-            {
-                "t_split": _safe_float(node.split_time),
-                "delta_aicc": _safe_float(node.delta_aicc),
-                "delta_rmse": _safe_float(node.delta_rmse),
-                "join_gap": _safe_float(node.join_gap),
-                "penalized_score": _safe_float(node.penalized_score),
-            }
-        )
+        detail: Dict[str, float] = {"t_split": float(node.split_time)}
+        if node.delta_aicc is not None:
+            detail["delta_aicc"] = float(node.delta_aicc)
+        if node.delta_rmse is not None:
+            detail["delta_rmse"] = float(node.delta_rmse)
+        if node.join_gap is not None:
+            detail["join_gap"] = float(node.join_gap)
+        if node.penalized_score is not None:
+            detail["penalized_score"] = float(node.penalized_score)
+        details.append(detail)
     for child in node.children:
         details.extend(_collect_split_details(child))
     return details
@@ -906,7 +915,7 @@ def run_recursive_split(
         raise RuntimeError("Unable to obtain a valid root model fit.")
 
     if try_page_at_root and root_scores:
-        best_name = min(root_scores, key=root_scores.get)
+        best_name = min(root_scores.items(), key=lambda item: item[1])[0]
         if best_name != best_spec.name:
             raise AssertionError("Root model selection failed to choose best AICc")
 
