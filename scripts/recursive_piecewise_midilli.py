@@ -9,7 +9,7 @@ import math
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -69,6 +69,30 @@ def _safe_float(value: Optional[float | int | np.floating]) -> Optional[float]:
     return numeric
 
 
+def _sanitize_scalar(value: Any) -> Any:
+    if isinstance(value, (bool, str)) or value is None:
+        return value
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        numeric = _safe_float(float(value))
+        return numeric if numeric is not None else None
+    return value
+
+
+def _sanitize_mapping(data: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned: Dict[str, Any] = {}
+    for key, value in data.items():
+        if isinstance(value, dict):
+            cleaned[key] = _sanitize_mapping(value)
+        elif isinstance(value, list):
+            cleaned[key] = [
+                _sanitize_mapping(item) if isinstance(item, dict) else _sanitize_scalar(item)
+                for item in value
+            ]
+        else:
+            cleaned[key] = _sanitize_scalar(value)
+    return cleaned
+
+
 def _segment_stats(result: FitResult) -> Optional[Tuple[int, float, int]]:
     """Return (n_obs, sse, k) for a fitted segment or ``None`` if unavailable."""
 
@@ -104,6 +128,134 @@ def _segment_stats(result: FitResult) -> Optional[Tuple[int, float, int]]:
     return n_obs_int, float(sse), k_int
 
 
+def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
+    signed = np.sign(residuals)
+    signed = signed[signed != 0]
+    n = signed.size
+    if n < 2:
+        return float("nan"), float("nan")
+    n_pos = int(np.sum(signed > 0))
+    n_neg = int(np.sum(signed < 0))
+    if n_pos == 0 or n_neg == 0:
+        return 0.0, float("inf")
+    runs = 1 + int(np.sum(signed[:-1] != signed[1:]))
+    expected = (2 * n_pos * n_neg) / n + 1
+    variance = (2 * n_pos * n_neg * (2 * n_pos * n_neg - n_pos - n_neg)) / (n**2 * (n - 1))
+    if variance <= 0:
+        return float("nan"), float("nan")
+    z_score = (runs - expected) / math.sqrt(variance)
+    p_value = math.erfc(abs(z_score) / math.sqrt(2))
+    return float(p_value), float(z_score)
+
+
+def _durbin_watson(residuals: np.ndarray) -> float:
+    if residuals.size < 2:
+        return float("nan")
+    diff = np.diff(residuals)
+    denom = float(np.dot(residuals, residuals))
+    if denom <= 0:
+        return float("nan")
+    return float(np.dot(diff, diff) / denom)
+
+
+def _lag1_autocorr(residuals: np.ndarray) -> float:
+    if residuals.size < 2:
+        return float("nan")
+    x = residuals[:-1]
+    y = residuals[1:]
+    x_mean = float(np.mean(x))
+    y_mean = float(np.mean(y))
+    num = float(np.sum((x - x_mean) * (y - y_mean)))
+    denom = math.sqrt(float(np.sum((x - x_mean) ** 2) * np.sum((y - y_mean) ** 2)))
+    if denom <= 0:
+        return float("nan")
+    return float(num / denom)
+
+
+def _cusum_stat(residuals: np.ndarray) -> Tuple[float, bool]:
+    if residuals.size == 0:
+        return float("nan"), False
+    mean = float(np.mean(residuals))
+    if residuals.size < 2:
+        return float("nan"), False
+    std = float(np.std(residuals, ddof=1))
+    if not math.isfinite(std) or std <= 0:
+        return float("nan"), False
+    standardized = (residuals - mean) / std
+    cumulative = np.cumsum(standardized)
+    stat = float(np.max(np.abs(cumulative))) if cumulative.size else float("nan")
+    limit = 1.358 * math.sqrt(residuals.size)
+    flag = bool(math.isfinite(stat) and stat > limit)
+    return stat, flag
+
+
+def _evaluate_residual_tests(
+    residuals: np.ndarray,
+    smoothed: np.ndarray,
+    residual_r2: float,
+) -> Dict[str, object]:
+    diagnostics: Dict[str, object] = {}
+    if residuals.size == 0:
+        diagnostics.update(
+            {
+                "tests_fired": [],
+                "tests_fired_count": 0,
+                "n_residuals": 0,
+            }
+        )
+        return diagnostics
+
+    if not math.isfinite(residual_r2):
+        residual_r2 = _residual_r2(residuals, smoothed)
+
+    mean = float(np.mean(residuals))
+    sigma = float(np.std(residuals, ddof=1)) if residuals.size > 1 else float("nan")
+    if not math.isfinite(sigma) or sigma == 0:
+        a_over_sigma = float("inf") if abs(mean) > 0 else float("nan")
+    else:
+        a_over_sigma = abs(mean) / sigma
+
+    runs_p, runs_z = _runs_test(residuals)
+    dw = _durbin_watson(residuals)
+    rho1 = _lag1_autocorr(residuals)
+    cusum_stat, cusum_flag = _cusum_stat(residuals)
+
+    diagnostics.update(
+        {
+            "n_residuals": residuals.size,
+            "residual_mean": mean,
+            "residual_sigma": sigma,
+            "a_over_sigma": a_over_sigma,
+            "residual_r2": residual_r2,
+            "runs_p_value": runs_p,
+            "runs_z": runs_z,
+            "durbin_watson": dw,
+            "rho1": rho1,
+            "cusum_stat": cusum_stat,
+            "cusum_flag": cusum_flag,
+        }
+    )
+
+    fired: List[str] = []
+    if math.isfinite(a_over_sigma) and a_over_sigma >= 0.5:
+        fired.append("a_over_sigma")
+    if math.isfinite(residual_r2) and residual_r2 >= 0.1:
+        fired.append("residual_r2")
+    if math.isfinite(runs_p) and runs_p <= 0.05:
+        fired.append("runs_test")
+    if math.isfinite(dw):
+        if dw <= 1.5 or dw >= 2.5:
+            fired.append("durbin_watson")
+    elif math.isfinite(rho1) and abs(rho1) >= 0.3:
+        fired.append("rho1")
+    if cusum_flag:
+        fired.append("cusum")
+
+    diagnostics["tests_fired"] = fired
+    diagnostics["tests_fired_count"] = len(fired)
+    return diagnostics
+
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -124,14 +276,15 @@ class SegmentNode:
     split_time: Optional[float] = None
     combined_rmse: Optional[float] = None
     combined_aicc: Optional[float] = None
-    penalized_score: Optional[float] = None
+    selection_score: Optional[float] = None
     join_gap: Optional[float] = None
     delta_rmse: Optional[float] = None
     delta_aicc: Optional[float] = None
     residual_r2: Optional[float] = None
     index_start: Optional[int] = None
     index_end: Optional[int] = None
-    candidate_metrics: List[Dict[str, float]] = field(default_factory=list)
+    residual_diagnostics: Dict[str, object] = field(default_factory=dict)
+    candidate_metrics: List[Dict[str, object]] = field(default_factory=list)
     children: List["SegmentNode"] = field(default_factory=list)
 
     def is_leaf(self) -> bool:
@@ -166,30 +319,21 @@ class SegmentNode:
                     "t_split": self.split_time,
                     "combined_rmse": _safe_float(self.combined_rmse),
                     "combined_aicc": _safe_float(self.combined_aicc),
-                    "penalized_score": _safe_float(self.penalized_score),
+                    "selection_score": _safe_float(self.selection_score),
                     "join_gap": _safe_float(self.join_gap),
                     "delta_rmse": _safe_float(self.delta_rmse),
                     "delta_aicc": _safe_float(self.delta_aicc),
                 }
             )
+        if self.residual_diagnostics:
+            payload["residual_diagnostics"] = _sanitize_mapping(self.residual_diagnostics)
         if self.children:
             payload["children"] = [child.to_dict() for child in self.children]
         if self.candidate_metrics:
-            cleaned: List[Dict[str, object]] = []
-            for entry in self.candidate_metrics:
-                cleaned_entry = cast(
-                    Dict[str, object],
-                    {
-                        key: (
-                            _safe_float(value)
-                            if isinstance(value, (int, float, np.floating))
-                            else value
-                        )
-                        for key, value in entry.items()
-                    },
-                )
-                cleaned.append(cleaned_entry)
-            payload["candidates"] = cleaned
+            payload["candidates"] = [
+                cast(Dict[str, object], _sanitize_mapping(entry))
+                for entry in self.candidate_metrics
+            ]
         return payload
 
 
@@ -204,7 +348,7 @@ class CandidateEvaluation:
     combined_rmse: float
     combined_aicc: float
     join_gap: float
-    penalized_score: float
+    base_score: float
 
 
 @dataclass(frozen=True)
@@ -218,10 +362,13 @@ class SplitConfig:
     max_fraction: float
     min_points_root: int
     min_points_leaf: int
-    improvement_threshold: float
+    root_improvement_threshold: float
+    deep_improvement_threshold: float
     lowess_frac_min: float
     lowess_frac_max: float
     max_iter: int
+    shape_evidence_weight: float
+    root_gap_relax: float
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +409,7 @@ def recursive_split_segment(
     )
 
     residual_r2 = _residual_r2(residuals, smoothed)
+    diagnostics = _evaluate_residual_tests(residuals, smoothed, residual_r2)
 
     min_points = _min_points_for_depth(
         depth,
@@ -295,6 +443,7 @@ def recursive_split_segment(
         residual_r2=residual_r2,
         index_start=int(indices[0]) if indices.size else None,
         index_end=int(indices[-1]) if indices.size else None,
+        residual_diagnostics=diagnostics,
     )
 
     if depth >= config.max_depth or remaining_splits <= 0:
@@ -324,21 +473,31 @@ def recursive_split_segment(
 
     best_candidate: Optional[CandidateEvaluation] = None
     best_priority: Tuple[float, float] | None = None
+    tests_fired_count = int(diagnostics.get("tests_fired_count", 0))
+    improvement_threshold = (
+        config.root_improvement_threshold
+        if depth == 0
+        else config.deep_improvement_threshold
+    )
 
     for cand in candidates:
         improvement = _relative_improvement(baseline_rmse, cand.combined_rmse)
         delta_rmse = baseline_rmse - cand.combined_rmse
         delta_aicc = baseline_aicc - cand.combined_aicc
-        candidate_payload: Dict[str, float] = {
+        candidate_payload: Dict[str, object] = {
             "t_split": float(cand.t_split),
             "delta_rmse": float(delta_rmse),
             "delta_aicc": float(delta_aicc),
             "rel_improvement": float(improvement),
             "join_gap": float(cand.join_gap),
-            "penalized_score": float(cand.penalized_score),
+            "base_score": float(cand.base_score),
             "combined_rmse": float(cand.combined_rmse),
             "combined_aicc": float(cand.combined_aicc),
+            "tests_fired": tests_fired_count,
         }
+        fired_names = diagnostics.get("tests_fired")
+        if isinstance(fired_names, list) and fired_names:
+            candidate_payload["tests_fired_names"] = ",".join(str(name) for name in fired_names)
         left_stats = _segment_stats(cand.left_result)
         right_stats = _segment_stats(cand.right_result)
         if left_stats is not None and right_stats is not None:
@@ -353,25 +512,46 @@ def recursive_split_segment(
                     "k_total": float(k_left + k_right),
                 }
             )
+        evidence_score = max(delta_aicc, 0.0) * tests_fired_count
+        final_score = cand.base_score - config.shape_evidence_weight * evidence_score
+        candidate_payload["evidence_score"] = float(evidence_score)
+        candidate_payload["selection_score"] = float(final_score)
         node.candidate_metrics.append(candidate_payload)
         logger.debug(
-            "%sCAND t=%.3f | ΔRMSE=%.4f ΔAICc=%.2f gap=%.4f score=%.2f",
+            "%sCAND t=%.3f | ΔRMSE=%.4f ΔAICc=%.2f gap=%.4f score=%.2f tests=%d",
             log_prefix,
             cand.t_split,
             delta_rmse,
             delta_aicc,
             cand.join_gap,
-            cand.penalized_score,
+            final_score,
+            tests_fired_count,
         )
 
-        if improvement < config.improvement_threshold:
+        if improvement < improvement_threshold:
             continue
-        if not math.isfinite(baseline_aicc) or not math.isfinite(cand.penalized_score):
+        if not math.isfinite(baseline_aicc) or not math.isfinite(final_score):
             continue
         if cand.combined_aicc >= baseline_aicc:
             continue
 
-        priority = (cand.penalized_score, cand.combined_rmse)
+        accept_candidate = False
+        if delta_aicc >= 10.0 and cand.join_gap <= config.max_allowed_gap:
+            accept_candidate = True
+        elif 4.0 <= delta_aicc < 10.0 and cand.join_gap <= config.max_allowed_gap:
+            accept_candidate = tests_fired_count >= 2
+        elif (
+            depth == 0
+            and tests_fired_count >= 3
+            and cand.join_gap <= config.max_allowed_gap * config.root_gap_relax
+            and delta_aicc > 0.0
+        ):
+            accept_candidate = True
+
+        if not accept_candidate:
+            continue
+
+        priority = (final_score, cand.combined_rmse)
         if best_priority is None or priority < best_priority:
             best_priority = priority
             best_candidate = cand
@@ -382,7 +562,9 @@ def recursive_split_segment(
     node.split_time = best_candidate.t_split
     node.combined_rmse = best_candidate.combined_rmse
     node.combined_aicc = best_candidate.combined_aicc
-    node.penalized_score = best_candidate.penalized_score
+    node.selection_score = (
+        best_priority[0] if best_priority is not None else float("nan")
+    )
     node.join_gap = best_candidate.join_gap
     node.delta_rmse = baseline_rmse - best_candidate.combined_rmse
     node.delta_aicc = baseline_aicc - best_candidate.combined_aicc
@@ -393,7 +575,7 @@ def recursive_split_segment(
         raise AssertionError("Accepted split exceeds max allowed join gap")
     if node.delta_rmse is not None:
         rel_improvement = _relative_improvement(baseline_rmse, best_candidate.combined_rmse)
-        if rel_improvement < config.improvement_threshold - 1e-12:
+        if rel_improvement < improvement_threshold - 1e-12:
             raise AssertionError("Accepted split fails minimum relative improvement")
 
     logger.info(
@@ -403,7 +585,7 @@ def recursive_split_segment(
         node.delta_rmse if node.delta_rmse is not None else float("nan"),
         node.delta_aicc if node.delta_aicc is not None else float("nan"),
         node.join_gap if node.join_gap is not None else float("nan"),
-        node.penalized_score if node.penalized_score is not None else float("nan"),
+        node.selection_score if node.selection_score is not None else float("nan"),
     )
 
     if log_prefix:
@@ -511,12 +693,16 @@ def _generate_candidates(
 
     grid_candidates: List[int] = []
     if candidate_grid_count > 0 and end_idx > start_idx:
-        grid_candidates = np.linspace(
-            start_idx,
-            end_idx - 1,
-            num=min(candidate_grid_count, max(end_idx - start_idx, 1)),
-            dtype=int,
-        ).tolist()
+        grid_target = int(np.clip(candidate_grid_count, 20, 30))
+        span = max(end_idx - start_idx, 1)
+        grid_count = min(grid_target, span)
+        if grid_count > 0:
+            grid_candidates = np.linspace(
+                start_idx,
+                end_idx - 1,
+                num=grid_count,
+                dtype=int,
+            ).tolist()
 
     candidate_indices = sorted(set(lowess_candidates + grid_candidates))
     if not candidate_indices:
@@ -570,7 +756,7 @@ def _generate_candidates(
         if gap > max_allowed_gap:
             continue
 
-        penalized_score = float(combined_aicc + join_penalty * (gap**2))
+        base_score = float(combined_aicc + join_penalty * (gap**2))
 
         yield CandidateEvaluation(
             index=int(idx),
@@ -580,7 +766,7 @@ def _generate_candidates(
             combined_rmse=combined_rmse,
             combined_aicc=combined_aicc,
             join_gap=gap,
-            penalized_score=penalized_score,
+            base_score=base_score,
         )
 
 
@@ -763,9 +949,9 @@ def _collect_split_details(node: SegmentNode) -> List[Dict[str, float]]:
             detail["delta_rmse"] = float(node.delta_rmse)
         if node.join_gap is not None:
             detail["join_gap"] = float(node.join_gap)
-        if node.penalized_score is not None:
-            detail["penalized_score"] = float(node.penalized_score)
-        details.append(detail)
+        if node.selection_score is not None:
+            detail["selection_score"] = float(node.selection_score)
+    details.append(detail)
     for child in node.children:
         details.extend(_collect_split_details(child))
     return details
@@ -930,6 +1116,48 @@ def _write_leaf_csv(path: Path, leaves: Sequence[SegmentNode]) -> None:
             writer.writerow(row)
 
 
+def _write_pre_post_table(path: Path, rows: Sequence[Dict[str, object]]) -> None:
+    import csv
+
+    if not rows:
+        return
+
+    base_fields = [
+        "stage",
+        "n_segments",
+        "rmse",
+        "aicc",
+        "k_total",
+        "a_over_sigma",
+        "residual_r2",
+        "runs_p_value",
+        "runs_z",
+        "durbin_watson",
+        "rho1",
+        "cusum_flag",
+        "cusum_stat",
+        "tests_fired_count",
+        "tests_fired",
+        "accepted_splits",
+        "total_join_gap",
+        "delta_aicc_total",
+    ]
+
+    extra_fields: List[str] = []
+    for row in rows:
+        for key in row:
+            if key not in base_fields and key not in extra_fields:
+                extra_fields.append(key)
+
+    fieldnames = base_fields + extra_fields
+
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -955,6 +1183,7 @@ def run_recursive_split(
     lowess_frac_max: float,
     try_page_at_root: bool,
     max_iter: int,
+    shape_evidence_weight: float,
 ) -> Dict[str, object]:
     preprocess = load_and_preprocess(input_path, head_trim_min=head_trim_min)
     time = preprocess.time_min
@@ -1000,6 +1229,7 @@ def run_recursive_split(
         if best_name != best_spec.name:
             raise AssertionError("Root model selection failed to choose best AICc")
 
+    deep_rel_improvement = max(min_rel_improvement * 0.5, 0.0)
     config = SplitConfig(
         max_depth=max_depth,
         join_penalty=join_penalty,
@@ -1010,10 +1240,13 @@ def run_recursive_split(
         max_fraction=max_fraction,
         min_points_root=min_points_root,
         min_points_leaf=min_points_leaf,
-        improvement_threshold=min_rel_improvement,
+        root_improvement_threshold=min_rel_improvement,
+        deep_improvement_threshold=deep_rel_improvement,
         lowess_frac_min=lowess_frac_min,
         lowess_frac_max=lowess_frac_max,
         max_iter=max_iter,
+        shape_evidence_weight=shape_evidence_weight,
+        root_gap_relax=0.25,
     )
 
     indices = np.arange(time.size)
@@ -1041,6 +1274,10 @@ def run_recursive_split(
     )
 
     predictions = _piecewise_predictions(time, root_node)
+    if np.isnan(predictions).any():
+        base_spec = _get_spec_by_name(root_node.model_type)
+        fallback = base_spec.predict(time, root_node.params)
+        predictions = np.where(np.isnan(predictions), fallback, predictions)
     _plot_dataset_fit(
         time,
         mr,
@@ -1066,6 +1303,111 @@ def run_recursive_split(
 
     _write_leaf_csv(dataset_outdir / "segments.csv", leaves)
 
+    post_residuals = mr - predictions
+    post_smoothed = _smooth_residuals(
+        time,
+        post_residuals,
+        lowess_frac_min=config.lowess_frac_min,
+        lowess_frac_max=config.lowess_frac_max,
+    )
+    post_r2 = _residual_r2(post_residuals, post_smoothed)
+    post_diag = _evaluate_residual_tests(post_residuals, post_smoothed, post_r2)
+
+    baseline_diag = _sanitize_mapping(root_node.residual_diagnostics)
+    post_diag_clean = _sanitize_mapping(post_diag)
+
+    baseline_tests_list = baseline_diag.get("tests_fired", [])
+    if isinstance(baseline_tests_list, list):
+        baseline_tests_str = ",".join(str(item) for item in baseline_tests_list)
+    else:
+        baseline_tests_str = ""
+    post_tests_list = post_diag_clean.get("tests_fired", [])
+    if isinstance(post_tests_list, list):
+        post_tests_str = ",".join(str(item) for item in post_tests_list)
+    else:
+        post_tests_str = ""
+
+    def _coerce_count(value: Any) -> int:
+        if isinstance(value, (int, np.integer)):
+            return int(value)
+        if isinstance(value, float) and math.isfinite(value):
+            return int(round(value))
+        return 0
+
+    baseline_tests_count = _coerce_count(baseline_diag.get("tests_fired_count"))
+    post_tests_count = _coerce_count(post_diag_clean.get("tests_fired_count"))
+
+    total_n = int(time.size)
+    post_sse = float(np.sum(post_residuals**2))
+    post_rmse = (
+        math.sqrt(max(post_sse, 0.0) / total_n) if total_n > 0 else float("nan")
+    )
+    k_total = sum(len(leaf.params) for leaf in leaves)
+    if post_sse <= 0 or total_n <= k_total + 1:
+        post_aicc = float("inf")
+    else:
+        mse_post = post_sse / total_n
+        post_aic = total_n * math.log(mse_post) + 2 * k_total
+        post_aicc = post_aic + (
+            2 * k_total * (k_total + 1)
+        ) / (total_n - k_total - 1)
+
+    baseline_row = {
+        "stage": "baseline",
+        "n_segments": 1,
+        "rmse": float(root_node.rmse),
+        "aicc": float(root_node.aicc),
+        "k_total": len(root_node.params),
+        "a_over_sigma": baseline_diag.get("a_over_sigma"),
+        "residual_r2": baseline_diag.get("residual_r2"),
+        "runs_p_value": baseline_diag.get("runs_p_value"),
+        "runs_z": baseline_diag.get("runs_z"),
+        "durbin_watson": baseline_diag.get("durbin_watson"),
+        "rho1": baseline_diag.get("rho1"),
+        "cusum_flag": baseline_diag.get("cusum_flag"),
+        "cusum_stat": baseline_diag.get("cusum_stat"),
+        "tests_fired_count": baseline_tests_count,
+        "tests_fired": baseline_tests_str,
+        "accepted_splits": "",
+        "total_join_gap": 0.0,
+        "delta_aicc_total": 0.0,
+    }
+
+    split_times = [detail.get("t_split") for detail in split_details if "t_split" in detail]
+    split_times_str = ";".join(
+        f"{float(t):.3f}" for t in split_times if isinstance(t, (int, float))
+    )
+
+    if math.isfinite(post_aicc) and math.isfinite(root_node.aicc):
+        delta_aicc_total = float(root_node.aicc - post_aicc)
+    else:
+        delta_aicc_total = float("nan")
+
+    post_row = {
+        "stage": "piecewise",
+        "n_segments": len(leaves),
+        "rmse": post_rmse,
+        "aicc": post_aicc,
+        "k_total": k_total,
+        "a_over_sigma": post_diag_clean.get("a_over_sigma"),
+        "residual_r2": post_diag_clean.get("residual_r2"),
+        "runs_p_value": post_diag_clean.get("runs_p_value"),
+        "runs_z": post_diag_clean.get("runs_z"),
+        "durbin_watson": post_diag_clean.get("durbin_watson"),
+        "rho1": post_diag_clean.get("rho1"),
+        "cusum_flag": post_diag_clean.get("cusum_flag"),
+        "cusum_stat": post_diag_clean.get("cusum_stat"),
+        "tests_fired_count": post_tests_count,
+        "tests_fired": post_tests_str,
+        "accepted_splits": split_times_str,
+        "total_join_gap": total_join_gap,
+        "delta_aicc_total": delta_aicc_total,
+    }
+
+    pre_post_table = [baseline_row, post_row]
+    _write_pre_post_table(dataset_outdir / "pre_post_table.csv", pre_post_table)
+    pre_post_table_clean = [_sanitize_mapping(row) for row in pre_post_table]
+
     summary = {
         "input": str(input_path),
         "head_trim_min": head_trim_min,
@@ -1081,11 +1423,24 @@ def run_recursive_split(
         "min_points_root": min_points_root,
         "min_points_leaf": min_points_leaf,
         "min_rel_improvement": min_rel_improvement,
+        "deep_min_rel_improvement": deep_rel_improvement,
         "max_iter": max_iter,
+        "shape_evidence_weight": shape_evidence_weight,
         "root_model": best_spec.name,
         "root_model_scores": root_scores,
         "total_join_gap": total_join_gap,
         "join_gap_limit": gap_limit,
+        "residual_diagnostics": {
+            "baseline": baseline_diag,
+            "piecewise": post_diag_clean,
+        },
+        "pre_post_table": pre_post_table_clean,
+        "post_metrics": {
+            "rmse": _sanitize_scalar(post_rmse),
+            "aicc": _sanitize_scalar(post_aicc),
+            "k_total": k_total,
+        },
+        "split_details": split_details,
         "tree": root_node.to_dict(),
     }
 
@@ -1118,13 +1473,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--min_fraction",
         type=float,
-        default=0.15,
+        default=0.10,
         help="Minimum fractional index (0-1) eligible for split consideration.",
     )
     parser.add_argument(
         "--max_fraction",
         type=float,
-        default=0.85,
+        default=0.90,
         help="Maximum fractional index (0-1) eligible for split consideration.",
     )
     parser.add_argument(
@@ -1145,8 +1500,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--min-rel-improvement",
         dest="min_rel_improvement",
         type=float,
-        default=0.05,
-        help="Relative RMSE improvement required to accept a split (e.g. 0.05 = 5%%).",
+        default=0.03,
+        help="Relative RMSE improvement required at the root (child segments use half).",
+    )
+    parser.add_argument(
+        "--min-points-leaf",
+        dest="min_points_leaf",
+        type=int,
+        default=12,
+        help="Minimum observations permitted for any leaf segment.",
+    )
+    parser.add_argument(
+        "--min-rel-improvement",
+        dest="min_rel_improvement",
+        type=float,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--improvement_threshold",
@@ -1175,14 +1543,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--max-allowed-gap",
         dest="max_allowed_gap",
         type=float,
-        default=0.03,
+        default=0.01,
         help="Maximum permitted MR discontinuity at split joins.",
     )
     parser.add_argument(
         "--candidate-grid-count",
         type=int,
-        default=10,
-        help="Number of evenly spaced grid candidates to union with LOWESS peaks.",
+        default=24,
+        help="Target evenly spaced grid candidates to union with LOWESS peaks (clamped to 20-30).",
     )
     parser.add_argument(
         "--probe-better-child",
@@ -1218,6 +1586,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         type=int,
         default=2000,
         help="Maximum solver iterations for each model fit (applied to least squares).",
+    )
+    parser.add_argument(
+        "--shape-evidence-weight",
+        dest="shape_evidence_weight",
+        type=float,
+        default=5.0,
+        help="Weight applied to residual-evidence scores when ranking candidate splits.",
     )
     parser.add_argument(
         "--log-level",
@@ -1269,6 +1644,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lowess_frac_max=args.lowess_frac_max,
             try_page_at_root=args.try_page_at_root,
             max_iter=args.max_iter,
+            shape_evidence_weight=args.shape_evidence_weight,
         )
         summaries.append(summary)
 
