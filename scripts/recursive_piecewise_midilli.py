@@ -1504,6 +1504,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Relative RMSE improvement required at the root (child segments use half).",
     )
     parser.add_argument(
+        "--min-points-leaf",
+        dest="min_points_leaf",
+        type=int,
+        default=12,
+        help="Minimum observations permitted for any leaf segment.",
+    )
+    parser.add_argument(
+        "--min-rel-improvement",
+        dest="min_rel_improvement",
+        type=float,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--improvement_threshold",
         type=float,
         help=argparse.SUPPRESS,
