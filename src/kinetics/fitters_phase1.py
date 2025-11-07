@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Sequ
 import joblib
 import numpy as np
 import pandas as pd
-from scipy.optimize import least_squares
+from scipy.optimize import OptimizeResult, least_squares
 
 __all__ = [
     "ModelSpec",
@@ -175,6 +175,7 @@ def _fit_single_model(spec: ModelSpec, time: np.ndarray, mr: np.ndarray) -> FitR
         "bic": bic,
         "loo_rmse": loo_rmse,
         "n_obs": n_obs,
+        "k": float(len(params_vector)),
     }
 
     params_dict = _vector_to_param_dict(params_vector, spec.param_names)
@@ -207,7 +208,7 @@ def _information_criteria(sse: float, n_obs: int, n_params: int) -> tuple[float,
 
 
 def _parameter_uncertainty(
-    result: least_squares,
+    result: OptimizeResult,
     sse: float,
     dof: int,
     spec: ModelSpec,
@@ -243,7 +244,7 @@ def _parameter_uncertainty(
 
 
 def _collect_warnings(
-    spec: ModelSpec, params: np.ndarray, result: least_squares
+    spec: ModelSpec, params: np.ndarray, result: OptimizeResult
 ) -> List[str]:
     warnings: List[str] = []
     if not result.success:
