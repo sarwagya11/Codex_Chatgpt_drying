@@ -279,7 +279,7 @@ class FitCache:
     def get(self, family: str, start: int, end: int) -> Optional[FitStats]:
         return self._cache.get((family, start, end))
 
-    def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
+    def put(self, family: str, start: int, end: int, stats: FitStats) -> None:
         self._cache[(family, start, end)] = stats
 
     def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
@@ -467,7 +467,7 @@ def fit_segment(
     else:
         stats = _fit_midilli(segment_time, segment_values, max_iter)
     if stats is not None:
-        cache.store(family, start, end, stats)
+        cache.put(family, start, end, stats)
     return stats
 
 
