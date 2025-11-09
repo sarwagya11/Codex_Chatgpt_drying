@@ -279,7 +279,10 @@ def gather_segment_records(
     prev_end_mr: float | None = None
 
     for order, node in enumerate(leaves):
-        params = node.get("unsplit", {}).get("params", {})
+        unsplit_info = node.get("unsplit", {})
+        if not isinstance(unsplit_info, dict):
+            unsplit_info = {}
+        params = unsplit_info.get("params", {})
         k = float(params.get("k", float("nan")))
         n = float(params.get("n", float("nan")))
         b = float(params.get("b", float("nan")))
@@ -317,7 +320,13 @@ def gather_segment_records(
         parent = parent_map.get(node["node_id"])
         join_gap = float(abs(parent.get("gap", 0.0))) if parent else 0.0
         is_root = bool(node.get("depth", 0) == 0)
-        min_points_hit = bool((end_idx - start_idx) <= max(min_points_leaf, 0))
+        n_obs = int(end_idx - start_idx)
+        min_points_hit = bool(n_obs < min_points_leaf)
+        family = unsplit_info.get("family", "")
+        if family is None:
+            family = ""
+        else:
+            family = str(family)
 
         record = {
             "dataset_index": dataset_index,
@@ -332,7 +341,7 @@ def gather_segment_records(
             "segment_mid_time": mid_time,
             "segment_start_MR": segment_start_mr,
             "segment_end_MR": segment_end_mr,
-            "n_obs": int(end_idx - start_idx),
+            "n_obs": n_obs,
             "depth": int(node.get("depth", 0)),
             "join_gap": join_gap,
             "left_slope": float(midilli_derivative(np.array([start_time]), k, n, b)[0]),
@@ -343,6 +352,7 @@ def gather_segment_records(
             "is_root": 1 if is_root else 0,
             "is_leaf": 1,
             "min_points_constraint_hit": 1 if min_points_hit else 0,
+            "family": family,
             "k": k,
             "n": n,
             "b": b,
