@@ -282,6 +282,8 @@ class FitCache:
     def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
         self._cache[(family, start, end)] = stats
 
+    def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
+        self._cache[(family, start, end)] = stats
 
 @dataclass
 class BudgetState:
