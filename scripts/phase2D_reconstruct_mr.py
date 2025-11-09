@@ -1,348 +1,428 @@
-"""Reconstruct drying curves from predicted Midilli parameters."""  # CHANGE: Updated script header
+"""Reconstruct MR(t) curves from predicted Midilli parameters."""
 
-from __future__ import annotations  # CHANGE: Future annotations retained
+from __future__ import annotations
 
-import argparse  # CHANGE: CLI parsing import
-import json  # CHANGE: Summary parsing
-import shutil  # CHANGE: File copying for plots
-from pathlib import Path  # CHANGE: Path handling
-from typing import Dict, Tuple  # CHANGE: Typing helpers
+import argparse
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Tuple
 
-import numpy as np  # CHANGE: Numerical operations
-import pandas as pd  # CHANGE: DataFrame handling
+import numpy as np
+import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 
-import sys  # CHANGE: Ensure project importability
+import sys
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]  # CHANGE: Project root
-_SRC_ROOT = _PROJECT_ROOT / "src"  # CHANGE: Source directory
-for candidate in (_PROJECT_ROOT, _SRC_ROOT):  # CHANGE: Extend sys.path loop
-    candidate_str = str(candidate)  # CHANGE: Convert to string
-    if candidate_str not in sys.path:  # CHANGE: Avoid duplicates
-        sys.path.insert(0, candidate_str)  # CHANGE: Insert path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SRC_ROOT = _PROJECT_ROOT / "src"
+for candidate in (_PROJECT_ROOT, _SRC_ROOT):
+    candidate_str = str(candidate)
+    if candidate_str not in sys.path:
+        sys.path.insert(0, candidate_str)
 
-from kinetics import load_and_preprocess  # noqa: E402  # CHANGE: Preprocess import
-from kinetics.metrics import count_monotonicity_violations  # noqa: E402  # CHANGE: Violation counter
-from kinetics.phase2_utils import (  # noqa: E402  # CHANGE: Shared utilities import
-    configure_logging,  # CHANGE: Logger factory
-    ensure_directory,  # CHANGE: Directory helper
-    extract_config_section,  # CHANGE: Config section helper
-    load_config,  # CHANGE: Config loader
-    midilli_curve,  # CHANGE: Midilli evaluation
-    resolve_dataset_path,  # CHANGE: Dataset resolver
+from kinetics import load_and_preprocess  # noqa: E402
+from kinetics.phase2_utils import (  # noqa: E402
+    clip_mr,
+    configure_logging,
+    ensure_directory,
+    extract_config_section,
+    load_config,
+    midilli_curve,
+    resolve_dataset_path,
+    inverse_softplus,
 )
-from kinetics.visualize import plot_mr_reconstruction  # noqa: E402  # CHANGE: Visualization helper
+from kinetics.visualize import plot_mr_reconstruction  # noqa: E402
 
-REQUIRED_COLUMNS = {"segment_start_time", "segment_duration", "pred_k", "pred_n", "pred_b"}  # CHANGE: Required columns
-DEFAULT_PREDICTIONS_CSV = _PROJECT_ROOT / "outputs" / "phase2" / "predicted_params.csv"  # CHANGE: Default predictions path
-DEFAULT_SUMMARY_INDEX = _PROJECT_ROOT / "outputs" / "recursive_split" / "summary_index.json"  # CHANGE: Summary index path
-DEFAULT_DATA_ROOT = _PROJECT_ROOT / "data"  # CHANGE: Data root
-DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "outputs" / "phase2" / "mr_curves"  # CHANGE: Per-dataset curves directory
-DEFAULT_RECONSTRUCTED_CSV = _PROJECT_ROOT / "outputs" / "reconstructed_mr.csv"  # CHANGE: Global output path
-DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"  # CHANGE: Diagnostics directory
-DEFAULT_PLOTS_DIR = _PROJECT_ROOT / "outputs" / "plots"  # CHANGE: Plots directory
-DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"  # CHANGE: Log directory
-DEFAULT_LOGGER_NAME = "phase2.phase2D"  # CHANGE: Logger name constant
+DEFAULT_PREDICTIONS_CSV = _PROJECT_ROOT / "outputs" / "phase2" / "predicted_params.csv"
+DEFAULT_SUMMARY_INDEX = _PROJECT_ROOT / "outputs" / "recursive_midilli" / "summary_index.json"
+DEFAULT_DATA_ROOT = _PROJECT_ROOT / "data"
+DEFAULT_OUTPUT_DIR = _PROJECT_ROOT / "outputs" / "phase2" / "mr_curves"
+DEFAULT_RECONSTRUCTED_CSV = _PROJECT_ROOT / "outputs" / "reconstructed_mr.csv"
+DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"
+DEFAULT_PLOTS_DIR = _PROJECT_ROOT / "outputs" / "plots"
+DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"
+DEFAULT_LOGGER_NAME = "phase2.phase2D"
+
+REQUIRED_COLUMNS = {"dataset_name", "segment_index", "segment_start_time", "segment_duration", "pred_k", "pred_n"}
 
 
-def parse_args() -> argparse.Namespace:  # CHANGE: CLI parser definition
-    parser = argparse.ArgumentParser(  # CHANGE: Parser creation
-        description="Rebuild MR(t) curves using predicted Midilli parameters.",  # CHANGE: Description update
+@dataclass
+class DatasetInfo:
+    path: Path
+    head_trim: float
+
+
+@dataclass
+class ReconstructionResult:
+    dataset_name: str
+    dataframe: pd.DataFrame
+    discontinuity_total: float
+    monotonicity_violations: int
+    segments_skipped: int
+    rmse: float
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Rebuild MR(t) curves using predicted Midilli parameters.",
     )
-    parser.add_argument(  # CHANGE: Predictions CSV argument
+    parser.add_argument(
         "--predictions-csv",
         type=Path,
         default=DEFAULT_PREDICTIONS_CSV,
         help="CSV produced by phase2C.",
     )
-    parser.add_argument(  # CHANGE: Summary index argument
+    parser.add_argument(
         "--summary-index",
         type=Path,
         default=DEFAULT_SUMMARY_INDEX,
-        help="Phase-1 summary index for resolving dataset metadata.",
+        help="summary_index.json mapping datasets to raw files.",
     )
-    parser.add_argument(  # CHANGE: Data root argument
+    parser.add_argument(
         "--data-root",
         type=Path,
         default=DEFAULT_DATA_ROOT,
         help="Directory containing the raw drying datasets.",
     )
-    parser.add_argument(  # CHANGE: Per-dataset output directory argument
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="Directory for reconstructed curves and per-dataset diagnostics.",
+        help="Directory for per-dataset reconstructed curves.",
     )
-    parser.add_argument(  # CHANGE: Synthetic points argument
-        "--synthetic-points",
-        type=int,
-        default=75,
-        help="Points per segment when no ground-truth dataset is available.",
-    )
-    parser.add_argument(  # CHANGE: Global reconstructed CSV argument
+    parser.add_argument(
         "--reconstructed-csv",
         type=Path,
         default=DEFAULT_RECONSTRUCTED_CSV,
-        help="Path for the aggregated reconstructed MR curves.",
+        help="Path for aggregated reconstructed MR curves.",
     )
-    parser.add_argument(  # CHANGE: Diagnostics directory argument
+    parser.add_argument(
         "--diagnostics-dir",
         type=Path,
         default=DEFAULT_DIAGNOSTICS_DIR,
-        help="Directory for continuity/monotonicity diagnostics.",
+        help="Directory for diagnostics outputs.",
     )
-    parser.add_argument(  # CHANGE: Plots directory argument
+    parser.add_argument(
         "--plots-dir",
         type=Path,
         default=DEFAULT_PLOTS_DIR,
         help="Directory for reconstruction plots.",
     )
-    parser.add_argument(  # CHANGE: Config path argument
-        "--config",
-        type=Path,
-        default=None,
-        help="Optional JSON/YAML config file with overrides.",
+    parser.add_argument(
+        "--synthetic-points",
+        type=int,
+        default=75,
+        help="Number of synthetic points per segment when ground truth is unavailable.",
     )
-    parser.add_argument(  # CHANGE: Log level argument
-        "--log-level",
-        type=str,
-        default="INFO",
-        help="Logging level (e.g., INFO, DEBUG).",
+    parser.add_argument(
+        "--disable-isotonic",
+        action="store_true",
+        help="Disable isotonic post-processing of predicted curves.",
     )
-    parser.add_argument(  # CHANGE: Log directory argument
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=DEFAULT_LOG_DIR,
         help="Directory for log files.",
     )
-    return parser.parse_args()  # CHANGE: Return parsed args
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="Logging level (e.g., INFO, DEBUG).",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional JSON/YAML config file with overrides.",
+    )
+    return parser.parse_args()
 
 
-def load_dataset_registry(summary_path: Path, data_root: Path) -> Dict[str, Tuple[Path, float]]:  # CHANGE: Registry helper
-    if not summary_path.exists():  # CHANGE: Guard missing summary
-        return {}  # CHANGE: Return empty registry
-    summary = json.loads(summary_path.read_text())  # CHANGE: Load summary JSON
-    default_head_trim = float(summary.get("head_trim_min", 0.0))  # CHANGE: Default head trim
-    registry: Dict[str, Tuple[Path, float]] = {}  # CHANGE: Registry container
-    for entry in summary.get("datasets", []):  # CHANGE: Iterate datasets
-        raw_input = entry.get("input")  # CHANGE: Raw input path
-        if raw_input is None:  # CHANGE: Skip missing path
-            continue  # CHANGE: Continue loop
-        resolved = resolve_dataset_path(raw_input, data_root)  # CHANGE: Resolve dataset
-        head_trim = float(entry.get("head_trim_min", default_head_trim))  # CHANGE: Determine head trim
-        registry[resolved.name] = (resolved, head_trim)  # CHANGE: Store registry entry
-    return registry  # CHANGE: Return registry
+def load_summary_index(summary_path: Path, data_root: Path) -> Dict[str, DatasetInfo]:
+    if not summary_path.exists():
+        return {}
+    payload = json.loads(summary_path.read_text())
+    registry: Dict[str, DatasetInfo] = {}
+    if isinstance(payload.get("datasets"), list):
+        default_trim = float(payload.get("head_trim_min", 0.0))
+        for entry in payload["datasets"]:
+            raw_input = entry.get("input")
+            if not raw_input:
+                continue
+            resolved = resolve_dataset_path(raw_input, data_root)
+            head_trim = float(entry.get("head_trim_min", default_trim))
+            registry[Path(raw_input).stem] = DatasetInfo(resolved, head_trim)
+    elif isinstance(payload.get("summaries"), list):
+        for entry in payload["summaries"]:
+            raw_input = entry.get("file")
+            if not raw_input:
+                continue
+            resolved = resolve_dataset_path(raw_input, data_root)
+            head_trim = float(entry.get("head_trim_min", 0.0))
+            registry[Path(raw_input).stem] = DatasetInfo(resolved, head_trim)
+    return registry
 
 
-def segment_end(row: pd.Series) -> float:  # CHANGE: Segment end helper
-    if pd.notna(row.get("segment_end_time")):  # CHANGE: Use provided end time
-        return float(row["segment_end_time"])  # CHANGE: Return explicit end
-    return float(row["segment_start_time"] + row["segment_duration"])  # CHANGE: Compute fallback
+def resolve_dataset(info: pd.Series, registry: Dict[str, DatasetInfo], data_root: Path) -> DatasetInfo | None:
+    source_path = info.get("source_path")
+    if isinstance(source_path, str) and source_path:
+        try:
+            resolved = resolve_dataset_path(source_path, data_root)
+            key = Path(source_path).stem
+            head_trim = registry.get(key, DatasetInfo(resolved, 0.0)).head_trim
+            return DatasetInfo(resolved, head_trim)
+        except FileNotFoundError:
+            pass
+    dataset_name = info.get("dataset_name")
+    if isinstance(dataset_name, str):
+        key = Path(dataset_name).stem
+        if key in registry:
+            return registry[key]
+        try:
+            resolved = resolve_dataset_path(f"{dataset_name}.csv", data_root)
+            return DatasetInfo(resolved, 0.0)
+        except FileNotFoundError:
+            return None
+    return None
 
 
-def enforce_continuity(preds: np.ndarray, last_value: float | None) -> Tuple[np.ndarray, float]:  # CHANGE: Continuity enforcement helper
-    if last_value is None or not np.isfinite(last_value):  # CHANGE: No adjustment needed
-        return preds, preds[-1] if preds.size else float("nan")  # CHANGE: Return as-is
-    offset = preds[0] - last_value  # CHANGE: Compute offset
-    adjusted = np.clip(preds - offset, 0.0, 1.1)  # CHANGE: Apply offset and clip
-    return adjusted, adjusted[-1] if adjusted.size else float("nan")  # CHANGE: Return adjusted preds
+def segment_end(row: pd.Series) -> float:
+    if pd.notna(row.get("segment_end_time")):
+        return float(row["segment_end_time"])
+    return float(row["segment_start_time"] + row["segment_duration"])
+
+
+def evaluate_segment(
+    times: np.ndarray,
+    params: Tuple[float, float, float],
+    prev_end: float | None,
+) -> Tuple[np.ndarray, float, float, int]:
+    preds = clip_mr(midilli_curve(times, *params))
+    discontinuity = 0.0
+    if prev_end is not None and preds.size:
+        offset = preds[0] - prev_end
+        preds = clip_mr(preds - offset)
+        discontinuity = abs(preds[0] - prev_end)
+    violations = int(np.sum(np.diff(preds) > 0)) if preds.size >= 2 else 0
+    end_value = preds[-1] if preds.size else (prev_end if prev_end is not None else float("nan"))
+    return preds, end_value, discontinuity, violations
 
 
 def reconstruct_with_actual(
     dataset_name: str,
     rows: pd.DataFrame,
-    dataset_path: Path,
-    head_trim: float,
-) -> Tuple[pd.DataFrame, float, dict]:  # CHANGE: Reconstruction with ground truth
-    preprocess = load_and_preprocess(dataset_path, head_trim)  # CHANGE: Load dataset
-    time = preprocess.time_min  # CHANGE: Time series
-    actual = preprocess.mr_iso  # CHANGE: Actual MR
-    predicted = np.full_like(actual, np.nan, dtype=float)  # CHANGE: Predicted array
+    dataset_info: DatasetInfo,
+    apply_isotonic: bool,
+) -> ReconstructionResult:
+    preprocess = load_and_preprocess(dataset_info.path, dataset_info.head_trim)
+    time = preprocess.time_min.astype(float)
+    actual = preprocess.mr_iso.astype(float)
 
-    rows_sorted = rows.sort_values("segment_start_time")  # CHANGE: Sort segments
-    last_mr = None  # CHANGE: Last MR tracker
-    discontinuity = 0.0  # CHANGE: Discontinuity accumulator
-    monotonic_violations = 0  # CHANGE: Monotonicity counter
+    predicted = np.full_like(actual, np.nan, dtype=float)
+    rows_sorted = rows.sort_values("segment_start_time")
+    prev_end = None
+    discontinuity_total = 0.0
+    monotonicity = 0
+    segments_skipped = 0
 
-    for _, row in rows_sorted.iterrows():  # CHANGE: Iterate segments
-        start = float(row["segment_start_time"])  # CHANGE: Start time
-        end = segment_end(row)  # CHANGE: End time
-        mask = (time >= start) & (time <= end + 1e-9)  # CHANGE: Segment mask
-        if not np.any(mask):  # CHANGE: Skip if no points
-            continue  # CHANGE: Continue loop
-        segment_time = time[mask]  # CHANGE: Segment times
-        preds = midilli_curve(segment_time, row["pred_k"], row["pred_n"], row["pred_b"])  # CHANGE: Evaluate Midilli
-        preds = np.clip(preds, 0.0, 1.1)  # CHANGE: Clip predictions
+    for _, row in rows_sorted.iterrows():
+        start = float(row["segment_start_time"])
+        end = segment_end(row)
+        mask = (time >= start) & (time <= end + 1e-9)
+        if not np.any(mask):
+            segments_skipped += 1
+            continue
+        segment_time = time[mask]
+        params = (float(row["pred_k"]), float(row["pred_n"]), float(row["pred_b"]))
+        preds, prev_end, discontinuity, violations = evaluate_segment(segment_time, params, prev_end)
+        predicted[mask] = preds
+        discontinuity_total += discontinuity
+        monotonicity += violations
 
-        if last_mr is not None:  # CHANGE: Continuity enforcement
-            preds, last_mr_candidate = enforce_continuity(preds, last_mr)  # CHANGE: Apply continuity
-            discontinuity += abs(preds[0] - last_mr)  # CHANGE: Accumulate discontinuity
-            last_mr = last_mr_candidate  # CHANGE: Update last MR
-        else:
-            last_mr = preds[-1]  # CHANGE: Initialize last MR
+    if apply_isotonic and np.isfinite(predicted).sum() >= 2:
+        valid_mask = np.isfinite(predicted)
+        iso = IsotonicRegression(increasing=False, out_of_bounds="clip")
+        fitted = iso.fit(time[valid_mask], predicted[valid_mask])
+        predicted_iso = predicted.copy()
+        predicted_iso[valid_mask] = fitted.predict(time[valid_mask])
+    else:
+        predicted_iso = predicted.copy()
 
-        monotonicity = np.diff(preds)  # CHANGE: Differences
-        monotonic_violations += int(np.sum(monotonicity > 0))  # CHANGE: Count upward jumps
-        predicted[mask] = preds  # CHANGE: Store predictions
+    valid = np.isfinite(predicted_iso) & np.isfinite(actual)
+    rmse = float(np.sqrt(np.mean((predicted_iso[valid] - actual[valid]) ** 2))) if np.any(valid) else float("nan")
 
-    valid = np.isfinite(predicted) & np.isfinite(actual)  # CHANGE: Valid mask
-    rmse = np.sqrt(np.mean((predicted[valid] - actual[valid]) ** 2)) if np.any(valid) else float("nan")  # CHANGE: RMSE calculation
-
-    df_out = pd.DataFrame(  # CHANGE: Output DataFrame
+    df_out = pd.DataFrame(
         {
             "dataset_name": dataset_name,
             "time_min": time,
             "mr_actual": actual,
             "mr_predicted": predicted,
+            "mr_predicted_iso": predicted_iso,
         }
     )
 
-    diag = {  # CHANGE: Diagnostics payload
-        "dataset_name": dataset_name,
-        "discontinuity_total": float(discontinuity),
-        "monotonicity_violations": int(monotonic_violations),
-        "rmse": float(rmse),
-    }
-    return df_out, rmse, diag  # CHANGE: Return reconstructed data
+    return ReconstructionResult(
+        dataset_name=dataset_name,
+        dataframe=df_out,
+        discontinuity_total=float(discontinuity_total),
+        monotonicity_violations=int(monotonicity),
+        segments_skipped=segments_skipped,
+        rmse=rmse,
+    )
 
 
 def reconstruct_synthetic(
-    dataset_label: str,
+    dataset_name: str,
     rows: pd.DataFrame,
-    points_per_segment: int,
-) -> Tuple[pd.DataFrame, dict]:  # CHANGE: Reconstruction without ground truth
-    times: list[np.ndarray] = []  # CHANGE: Time segments
-    preds_list: list[np.ndarray] = []  # CHANGE: Prediction segments
-    last_mr = None  # CHANGE: Last MR tracker
-    discontinuity = 0.0  # CHANGE: Discontinuity accumulator
-    monotonic_violations = 0  # CHANGE: Monotonicity counter
+    synthetic_points: int,
+    apply_isotonic: bool,
+) -> ReconstructionResult:
+    rows_sorted = rows.sort_values("segment_start_time")
+    time_values: List[float] = []
+    predicted_values: List[float] = []
+    prev_end = None
+    discontinuity_total = 0.0
+    monotonicity = 0
 
-    rows_sorted = rows.sort_values("segment_start_time")  # CHANGE: Sort segments
-    for _, row in rows_sorted.iterrows():  # CHANGE: Iterate segments
-        start = float(row["segment_start_time"])  # CHANGE: Start time
-        end = segment_end(row)  # CHANGE: End time
-        if not np.isfinite(start) or not np.isfinite(end):  # CHANGE: Guard invalid bounds
-            continue  # CHANGE: Continue loop
-        segment_times = np.linspace(start, end, max(points_per_segment, 2))  # CHANGE: Segment time grid
-        preds = np.clip(midilli_curve(segment_times, row["pred_k"], row["pred_n"], row["pred_b"]), 0.0, 1.1)  # CHANGE: Evaluate Midilli
-        if last_mr is not None:  # CHANGE: Continuity enforcement
-            preds, last_mr_candidate = enforce_continuity(preds, last_mr)  # CHANGE: Apply continuity
-            discontinuity += abs(preds[0] - last_mr)  # CHANGE: Accumulate discontinuity
-            last_mr = last_mr_candidate  # CHANGE: Update last MR
-        else:
-            last_mr = preds[-1]  # CHANGE: Initialize last MR
-        monotonic_violations += count_monotonicity_violations(preds, direction="decreasing")  # CHANGE: Count violations
-        times.append(segment_times)  # CHANGE: Append times
-        preds_list.append(preds)  # CHANGE: Append predictions
+    for idx, row in rows_sorted.iterrows():
+        start = float(row["segment_start_time"])
+        end = segment_end(row)
+        if end < start:
+            end = start
+        count = max(synthetic_points, 2)
+        segment_time = np.linspace(start, end, count)
+        if time_values and len(segment_time) > 1 and np.isclose(segment_time[0], time_values[-1]):
+            segment_time = segment_time[1:]
+        params = (float(row["pred_k"]), float(row["pred_n"]), float(row["pred_b"]))
+        preds, prev_end, discontinuity, violations = evaluate_segment(segment_time, params, prev_end)
+        time_values.extend(segment_time.tolist())
+        predicted_values.extend(preds.tolist())
+        discontinuity_total += discontinuity
+        monotonicity += violations
 
-    if not times:  # CHANGE: Guard no predictions
-        return (
-            pd.DataFrame(columns=["dataset_name", "time_min", "mr_actual", "mr_predicted"]),
-            {"dataset_name": dataset_label, "discontinuity_total": 0.0, "monotonicity_violations": 0, "rmse": float("nan")},
-        )  # CHANGE: Return empty
+    time_array = np.asarray(time_values, dtype=float)
+    predicted = np.asarray(predicted_values, dtype=float)
 
-    time_series = np.concatenate(times)  # CHANGE: Concatenate times
-    pred_series = np.concatenate(preds_list)  # CHANGE: Concatenate predictions
-    df = pd.DataFrame(  # CHANGE: Output DataFrame
+    if apply_isotonic and predicted.size >= 2:
+        iso = IsotonicRegression(increasing=False, out_of_bounds="clip")
+        predicted_iso = iso.fit(time_array, predicted).predict(time_array)
+    else:
+        predicted_iso = predicted.copy()
+
+    df_out = pd.DataFrame(
         {
-            "dataset_name": dataset_label,
-            "time_min": time_series,
-            "mr_actual": np.full_like(time_series, np.nan, dtype=float),
-            "mr_predicted": pred_series,
+            "dataset_name": dataset_name,
+            "time_min": time_array,
+            "mr_actual": np.full_like(time_array, np.nan, dtype=float),
+            "mr_predicted": predicted,
+            "mr_predicted_iso": predicted_iso,
         }
     )
 
-    diag = {  # CHANGE: Diagnostics payload
-        "dataset_name": dataset_label,
-        "discontinuity_total": float(discontinuity),
-        "monotonicity_violations": int(monotonic_violations),
-        "rmse": float("nan"),
-    }
-    return df, diag  # CHANGE: Return synthetic reconstruction
+    return ReconstructionResult(
+        dataset_name=dataset_name,
+        dataframe=df_out,
+        discontinuity_total=float(discontinuity_total),
+        monotonicity_violations=int(monotonicity),
+        segments_skipped=0,
+        rmse=float("nan"),
+    )
 
 
-def main() -> None:  # CHANGE: Main entrypoint
-    args = parse_args()  # CHANGE: Parse CLI args
-    config = load_config(args.config)  # CHANGE: Load optional config
-    section = extract_config_section(config, "phase2D")  # CHANGE: Phase2D config section
-
-    predictions_path = Path(section.get("predictions_csv", args.predictions_csv))  # CHANGE: Predictions path resolution
-    summary_index = Path(section.get("summary_index", args.summary_index))  # CHANGE: Summary path resolution
-    data_root = Path(section.get("data_root", args.data_root))  # CHANGE: Data root resolution
-    output_dir = Path(section.get("output_dir", args.output_dir))  # CHANGE: Output directory resolution
-    synthetic_points = int(section.get("synthetic_points", args.synthetic_points))  # CHANGE: Synthetic points resolution
-    reconstructed_csv = Path(section.get("reconstructed_csv", args.reconstructed_csv))  # CHANGE: Global CSV resolution
-    diagnostics_dir = Path(section.get("diagnostics_dir", args.diagnostics_dir))  # CHANGE: Diagnostics directory resolution
-    plots_dir = Path(section.get("plots_dir", args.plots_dir))  # CHANGE: Plots directory resolution
-    log_dir = Path(section.get("log_dir", args.log_dir))  # CHANGE: Log directory resolution
-    log_level = section.get("log_level", args.log_level)  # CHANGE: Log level resolution
-
-    for path in [output_dir, diagnostics_dir, plots_dir, reconstructed_csv.parent]:  # CHANGE: Ensure directories
-        ensure_directory(path)  # CHANGE: Create directories
-    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"  # CHANGE: Log path resolution
-    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)  # CHANGE: Configure logger
-
-    df = pd.read_csv(predictions_path)  # CHANGE: Load predictions
-    missing = REQUIRED_COLUMNS - set(df.columns)  # CHANGE: Required columns check
-    if missing:  # CHANGE: Guard missing columns
-        raise KeyError("Predictions CSV missing required columns: " + ", ".join(sorted(missing)))  # CHANGE: Error message
-    if "segment_end_time" not in df.columns:  # CHANGE: Ensure end time column
-        df["segment_end_time"] = df["segment_start_time"] + df["segment_duration"]  # CHANGE: Compute end time
-
-    registry = load_dataset_registry(summary_index, data_root)  # CHANGE: Load registry
-    logger.info("Loaded registry for %s datasets", len(registry))  # CHANGE: Log registry size
-
-    metrics_records: list[dict] = []  # CHANGE: Diagnostics records
-    curve_frames: list[pd.DataFrame] = []  # CHANGE: Combined curves
-    plot_paths: list[Path] = []  # CHANGE: Plot paths
-
-    group_labels = df["dataset_name"].fillna("scenario").astype(str)  # CHANGE: Dataset labels
-    grouped = df.groupby(group_labels)  # CHANGE: Group predictions
-
-    for dataset_name, rows in grouped:  # CHANGE: Iterate datasets
-        dataset_label = str(dataset_name)  # CHANGE: Normalize label
-        registry_entry = registry.get(dataset_label)  # CHANGE: Lookup dataset
-        if registry_entry:  # CHANGE: Actual dataset branch
-            dataset_path, head_trim = registry_entry  # CHANGE: Unpack registry entry
-            curve_df, rmse, diag = reconstruct_with_actual(dataset_label, rows, dataset_path, head_trim)  # CHANGE: Reconstruct actual
-        else:  # CHANGE: Synthetic branch
-            curve_df, diag = reconstruct_synthetic(dataset_label, rows, synthetic_points)  # CHANGE: Reconstruct synthetic
-            rmse = diag.get("rmse", float("nan"))  # CHANGE: RMSE fallback
-
-        curve_path = output_dir / f"{dataset_label}_mr_curve.csv"  # CHANGE: Per-dataset curve path
-        curve_df.to_csv(curve_path, index=False, float_format="%.9g")  # CHANGE: Write curve CSV
-        logger.info("Saved curve for %s to %s", dataset_label, curve_path)  # CHANGE: Log curve path
-
-        metrics_records.append(diag)  # CHANGE: Append diagnostics
-        curve_frames.append(curve_df)  # CHANGE: Append DataFrame
-
-        plot_path = plot_mr_reconstruction(curve_df, dataset_label, plots_dir)  # CHANGE: Generate plot
-        plot_paths.append(plot_path)  # CHANGE: Track plot
-        logger.debug("Generated plot for %s at %s", dataset_label, plot_path)  # CHANGE: Debug log
-
-    if curve_frames:  # CHANGE: Aggregate curves
-        combined_df = pd.concat(curve_frames, ignore_index=True)  # CHANGE: Combine DataFrames
-        combined_df.to_csv(reconstructed_csv, index=False, float_format="%.9g")  # CHANGE: Write aggregated CSV
-        logger.info("Wrote aggregated reconstruction to %s", reconstructed_csv)  # CHANGE: Log aggregated path
-    else:  # CHANGE: No curves branch
-        pd.DataFrame(columns=["dataset_name", "time_min", "mr_actual", "mr_predicted"]).to_csv(
-            reconstructed_csv, index=False
-        )  # CHANGE: Write empty aggregated CSV
-        logger.warning("No curves reconstructed; wrote empty aggregated file to %s", reconstructed_csv)  # CHANGE: Warn empty
-
-    diagnostics_df = pd.DataFrame(metrics_records)  # CHANGE: Diagnostics DataFrame
-    diagnostics_path = diagnostics_dir / "phase2D_violation_report.csv"  # CHANGE: Diagnostics CSV path
-    diagnostics_df.to_csv(diagnostics_path, index=False)  # CHANGE: Write diagnostics
-    logger.info("Recorded reconstruction diagnostics to %s", diagnostics_path)  # CHANGE: Log diagnostics
-
-    if plot_paths:  # CHANGE: Canonical plot output
-        canonical_plot = plots_dir / "reconstruction_plot.png"  # CHANGE: Canonical plot path
-        primary_plot = plot_paths[0]  # CHANGE: Primary plot path
-        if primary_plot != canonical_plot:  # CHANGE: Avoid duplicate copy
-            shutil.copyfile(primary_plot, canonical_plot)  # CHANGE: Copy plot
-        logger.info("Copied representative plot to %s", canonical_plot)  # CHANGE: Log canonical plot
-    else:  # CHANGE: No plots branch
-        logger.warning("No plots were generated during reconstruction.")  # CHANGE: Warn missing plots
+def ensure_pred_b(df: pd.DataFrame) -> pd.DataFrame:
+    if "pred_b" in df.columns:
+        return df
+    if "pred_b_pos" in df.columns:
+        df = df.copy()
+        df["pred_b"] = inverse_softplus(df["pred_b_pos"].to_numpy(dtype=float))
+    else:
+        raise KeyError("Predictions CSV is missing both 'pred_b' and 'pred_b_pos' columns.")
+    return df
 
 
-if __name__ == "__main__":  # CHANGE: Script guard
-    main()  # CHANGE: Invoke main
+def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+    section = extract_config_section(config, "phase2D")
+
+    predictions_path = Path(section.get("predictions_csv", args.predictions_csv))
+    summary_index_path = Path(section.get("summary_index", args.summary_index))
+    data_root = Path(section.get("data_root", args.data_root))
+    output_dir = Path(section.get("output_dir", args.output_dir))
+    reconstructed_csv = Path(section.get("reconstructed_csv", args.reconstructed_csv))
+    diagnostics_dir = Path(section.get("diagnostics_dir", args.diagnostics_dir))
+    plots_dir = Path(section.get("plots_dir", args.plots_dir))
+    synthetic_points = int(section.get("synthetic_points", args.synthetic_points))
+    apply_isotonic = not bool(section.get("disable_isotonic", args.disable_isotonic))
+    log_dir = Path(section.get("log_dir", args.log_dir))
+    log_level = section.get("log_level", args.log_level)
+
+    ensure_directory(output_dir)
+    ensure_directory(reconstructed_csv.parent)
+    ensure_directory(diagnostics_dir)
+    ensure_directory(plots_dir)
+    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"
+    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)
+
+    df = pd.read_csv(predictions_path)
+    missing = REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        raise KeyError(f"Predictions CSV missing required columns: {sorted(missing)}")
+    df = ensure_pred_b(df)
+    if "segment_end_time" not in df.columns or df["segment_end_time"].isna().all():
+        df["segment_end_time"] = df["segment_start_time"] + df["segment_duration"]
+
+    registry = load_summary_index(summary_index_path, data_root)
+
+    results: List[ReconstructionResult] = []
+    plots_generated: List[Path] = []
+    segment_counts = df.groupby("dataset_name").size()
+
+    for dataset_name, group in df.groupby("dataset_name"):
+        group = group.sort_values("segment_start_time")
+        info = resolve_dataset(group.iloc[0], registry, data_root)
+        if info is not None and info.path.exists():
+            result = reconstruct_with_actual(dataset_name, group, info, apply_isotonic)
+        else:
+            logger.warning("No ground truth found for %s; generating synthetic timeline.", dataset_name)
+            result = reconstruct_synthetic(dataset_name, group, synthetic_points, apply_isotonic)
+        results.append(result)
+
+        curve_path = output_dir / f"{dataset_name}_mr_curve.csv"
+        result.dataframe.to_csv(curve_path, index=False, float_format="%.9g")
+        plot_path = plot_mr_reconstruction(result.dataframe, dataset_name, plots_dir)
+        plots_generated.append(plot_path)
+        logger.info("Wrote reconstructed curve for %s to %s", dataset_name, curve_path)
+
+    if not results:
+        raise RuntimeError("No datasets were reconstructed.")
+
+    combined = pd.concat([res.dataframe for res in results], ignore_index=True)
+    combined.to_csv(reconstructed_csv, index=False, float_format="%.9g")
+
+    diagnostics = pd.DataFrame(
+        {
+            "dataset_name": [res.dataset_name for res in results],
+            "segment_count": [int(segment_counts.get(res.dataset_name, 0)) for res in results],
+            "segments_skipped": [res.segments_skipped for res in results],
+            "discontinuity_total": [res.discontinuity_total for res in results],
+            "monotonicity_violations": [res.monotonicity_violations for res in results],
+            "rmse": [res.rmse for res in results],
+        }
+    )
+    diagnostics_path = diagnostics_dir / "phase2D_violation_report.csv"
+    diagnostics.to_csv(diagnostics_path, index=False, float_format="%.9g")
+
+    if plots_generated:
+        canonical = plots_dir / "reconstruction_plot.png"
+        canonical.write_bytes(Path(plots_generated[0]).read_bytes())
+
+    logger.info("Aggregated MR curves written to %s", reconstructed_csv)
+    logger.info("Diagnostics written to %s", diagnostics_path)
+
+
+if __name__ == "__main__":
+    main()
