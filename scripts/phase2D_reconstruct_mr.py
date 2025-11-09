@@ -381,13 +381,16 @@ def main() -> None:
     plots_generated: List[Path] = []
     segment_counts = df.groupby("dataset_name").size()
 
-    for dataset_name, group in df.groupby("dataset_name"):
+    for dataset_name_raw, group in df.groupby("dataset_name"):
+        dataset_name = str(dataset_name_raw)
         group = group.sort_values("segment_start_time")
         info = resolve_dataset(group.iloc[0], registry, data_root)
         if info is not None and info.path.exists():
             result = reconstruct_with_actual(dataset_name, group, info, apply_isotonic)
         else:
-            logger.warning("No ground truth found for %s; generating synthetic timeline.", dataset_name)
+            logger.warning(
+                "No ground truth found for %s; generating synthetic timeline.", dataset_name
+            )
             result = reconstruct_synthetic(dataset_name, group, synthetic_points, apply_isotonic)
         results.append(result)
 

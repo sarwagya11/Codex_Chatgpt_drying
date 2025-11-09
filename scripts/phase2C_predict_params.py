@@ -189,9 +189,13 @@ def main() -> None:
 
     start_times = df["segment_start_time"].to_numpy(dtype=float)
     end_times = df["segment_end_time"].to_numpy(dtype=float)
-    k_vals = df.get("pred_k").to_numpy(dtype=float)
-    n_vals = df.get("pred_n").to_numpy(dtype=float)
-    b_vals = df.get("pred_b").to_numpy(dtype=float)
+    if "pred_k" not in df.columns or "pred_n" not in df.columns or "pred_b" not in df.columns:
+        missing = [col for col in ("pred_k", "pred_n", "pred_b") if col not in df.columns]
+        raise KeyError(f"Missing required prediction columns for Midilli evaluation: {missing}")
+
+    k_vals = df["pred_k"].to_numpy(dtype=float)
+    n_vals = df["pred_n"].to_numpy(dtype=float)
+    b_vals = df["pred_b"].to_numpy(dtype=float)
 
     df["pred_segment_start_MR"] = clip_mr(midilli_curve(start_times, k_vals, n_vals, b_vals))
     df["pred_segment_end_MR"] = clip_mr(midilli_curve(end_times, k_vals, n_vals, b_vals))

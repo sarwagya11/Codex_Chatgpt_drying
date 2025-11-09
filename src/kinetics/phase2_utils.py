@@ -213,11 +213,19 @@ def inverse_signed_log1p(values: Iterable[float] | np.ndarray) -> np.ndarray:  #
     return np.sign(arr) * np.expm1(np.abs(arr))  # CHANGE: Invert transform
 
 
-def midilli_curve(time: Iterable[float] | np.ndarray, k: float, n: float, b: float) -> np.ndarray:  # CHANGE: Midilli curve retained
+def midilli_curve(
+    time: Iterable[float] | np.ndarray,
+    k: float | Iterable[float] | np.ndarray,
+    n: float | Iterable[float] | np.ndarray,
+    b: float | Iterable[float] | np.ndarray,
+) -> np.ndarray:  # CHANGE: Midilli curve retained
     """Evaluate the Midilli model for given parameters."""  # CHANGE: Docstring retained
 
     t = np.asarray(time, dtype=float)  # CHANGE: Convert to ndarray
-    return np.exp(-k * np.power(t, n)) + b * t  # CHANGE: Evaluate curve
+    k_arr = np.asarray(k, dtype=float)
+    n_arr = np.asarray(n, dtype=float)
+    b_arr = np.asarray(b, dtype=float)
+    return np.exp(-k_arr * np.power(t, n_arr)) + b_arr * t  # CHANGE: Evaluate curve
 
 
 def midilli_derivative(time: Iterable[float] | np.ndarray, k: float, n: float, b: float) -> np.ndarray:
