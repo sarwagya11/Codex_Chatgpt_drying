@@ -168,7 +168,7 @@ def evaluate_cv(
         preds_transformed = model.predict(X.iloc[test_idx])
         preds = spec.inverse(np.asarray(preds_transformed, dtype=float))
         truth = spec.inverse(y_transformed[test_idx])
-        rmse = mean_squared_error(truth, preds, squared=False)
+        rmse = float(np.sqrt(mean_squared_error(truth, preds)))
         mae = mean_absolute_error(truth, preds)
         fold_metrics.append({
             "fold": fold_index,
@@ -199,7 +199,7 @@ def fit_and_record(
     if "pred_b_pos" in spec.extra_outputs:
         extra_outputs["pred_b_pos"] = np.asarray(preds_transformed, dtype=float)
 
-    train_rmse = float(mean_squared_error(spec.inverse(y_transformed), preds_main, squared=False))
+    train_rmse = float(np.sqrt(mean_squared_error(spec.inverse(y_transformed), preds_main)))
     train_mae = float(mean_absolute_error(spec.inverse(y_transformed), preds_main))
 
     fold_metrics, n_splits = evaluate_cv(estimator, features, y_transformed, spec, groups, min_folds)
