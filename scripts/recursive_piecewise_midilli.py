@@ -201,7 +201,7 @@ class CandidateRecord:
             "AICc_right": self.aicc_right,
             "RMSE_right": self.rmse_right,
             "AICc_unsplit": self.aicc_unsplit,
-            "ΔAICc": self.delta_aicc,
+            "delta_AICc": self.delta_aicc,
             "rel_impr": self.rel_improvement,
             "gap": self.gap,
             "slope_gap": self.slope_gap,
@@ -910,7 +910,7 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "AICc_right",
         "RMSE_right",
         "AICc_unsplit",
-        "ΔAICc",
+        "delta_AICc",
         "rel_impr",
         "gap",
         "slope_gap",
@@ -921,7 +921,7 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "reject_reason",
         "tests_fired_json",
     ]
-    with path.open("w", newline="") as handle:
+    with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for record in records:
