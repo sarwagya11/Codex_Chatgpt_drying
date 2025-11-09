@@ -1,299 +1,355 @@
-"""Train regressors for Midilli parameters using engineered features."""  # CHANGE: Updated script header
+"""Train regression models for Midilli parameters from segment features."""
 
-from __future__ import annotations  # CHANGE: Future annotations retained
+from __future__ import annotations
 
-import argparse  # CHANGE: CLI parsing import
-from pathlib import Path  # CHANGE: Path handling
-from typing import Dict  # CHANGE: Typing helper
+import argparse
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 
-import numpy as np  # CHANGE: Numerical operations
-import pandas as pd  # CHANGE: DataFrame handling
-from joblib import dump  # CHANGE: Model persistence
-from sklearn.base import clone  # CHANGE: Estimator cloning
-from sklearn.model_selection import KFold, cross_validate  # CHANGE: CV utilities
-from sklearn.compose import TransformedTargetRegressor  # CHANGE: Target transform
+import numpy as np
+import pandas as pd
+from joblib import dump
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.model_selection import GroupKFold
 
-import sys  # CHANGE: Ensure project importability
+import sys
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]  # CHANGE: Project root
-_SRC_ROOT = _PROJECT_ROOT / "src"  # CHANGE: Source directory
-for candidate in (_PROJECT_ROOT, _SRC_ROOT):  # CHANGE: Extend sys.path loop
-    candidate_str = str(candidate)  # CHANGE: Convert to string
-    if candidate_str not in sys.path:  # CHANGE: Avoid duplicates
-        sys.path.insert(0, candidate_str)  # CHANGE: Insert path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SRC_ROOT = _PROJECT_ROOT / "src"
+for candidate in (_PROJECT_ROOT, _SRC_ROOT):
+    candidate_str = str(candidate)
+    if candidate_str not in sys.path:
+        sys.path.insert(0, candidate_str)
 
-from kinetics.metrics import (  # noqa: E402  # CHANGE: Metrics utilities
-    compute_rmse,  # CHANGE: RMSE calculation
-    count_monotonicity_violations,  # CHANGE: Monotonicity counter
-)
-from kinetics.models_phase2 import (  # noqa: E402  # CHANGE: Shared model utilities
-    make_baseline_estimators,  # CHANGE: Estimator factory
-)
-from kinetics.phase2_utils import (  # noqa: E402  # CHANGE: Shared utilities import
-    ALL_FEATURE_COLUMNS,  # CHANGE: Feature columns
-    RAW_FEATURE_COLUMNS,  # CHANGE: Raw features
-    configure_logging,  # CHANGE: Logger factory
-    ensure_directory,  # CHANGE: Directory helper
-    extract_config_section,  # CHANGE: Config section helper
-    load_config,  # CHANGE: Config loader
-    prepare_feature_frame,  # CHANGE: Feature engineering
-    signed_log1p,  # CHANGE: Target transform function
-    inverse_signed_log1p,  # CHANGE: Inverse transform function
+from kinetics.phase2_utils import (  # noqa: E402
+    ALL_FEATURE_COLUMNS,
+    configure_logging,
+    ensure_directory,
+    extract_config_section,
+    load_config,
+    prepare_feature_frame,
+    softplus,
+    inverse_softplus,
 )
 
-DEFAULT_SEGMENTS_CSV = _PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv"  # CHANGE: Default input path
-DEFAULT_MODELS_DIR = _PROJECT_ROOT / "outputs" / "phase2" / "models"  # CHANGE: Models directory
-DEFAULT_METRICS_PATH = _PROJECT_ROOT / "outputs" / "model_performance.csv"  # CHANGE: Metrics file path
-DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"  # CHANGE: Log directory
-DEFAULT_LOGGER_NAME = "phase2.phase2B"  # CHANGE: Logger name constant
+DEFAULT_SEGMENTS_CSV = _PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv"
+DEFAULT_MODELS_DIR = _PROJECT_ROOT / "outputs" / "phase2" / "models"
+DEFAULT_METRICS_PATH = _PROJECT_ROOT / "outputs" / "phase2" / "model_performance.csv"
+DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"
+DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"
+DEFAULT_LOGGER_NAME = "phase2.phase2B"
+
+REQUIRED_TARGET_COLUMNS = {"k", "n", "b"}
 
 
-def parse_args() -> argparse.Namespace:  # CHANGE: CLI parser definition
-    parser = argparse.ArgumentParser(  # CHANGE: Parser creation
-        description="Fit regression models for Midilli parameters.",  # CHANGE: Description update
+@dataclass
+class TargetSpec:
+    name: str
+    column: str
+    transform: str
+    pred_column: str
+    extra_outputs: Tuple[str, ...] = ()
+
+    def forward(self, values: np.ndarray) -> np.ndarray:
+        if self.transform == "log":
+            clipped = np.clip(values, 1e-12, None)
+            return np.log(clipped)
+        if self.transform == "softplus":
+            return softplus(values)
+        return values
+
+    def inverse(self, values: np.ndarray) -> np.ndarray:
+        if self.transform == "log":
+            return np.exp(values)
+        if self.transform == "softplus":
+            return inverse_softplus(values)
+        return values
+
+
+TARGET_SPECS: Dict[str, TargetSpec] = {
+    "k": TargetSpec(name="k", column="k", transform="log", pred_column="pred_k"),
+    "n": TargetSpec(name="n", column="n", transform="identity", pred_column="pred_n"),
+    "b": TargetSpec(
+        name="b",
+        column="b",
+        transform="softplus",
+        pred_column="pred_b",
+        extra_outputs=("pred_b_pos",),
+    ),
+}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Fit regression models to Midilli parameters.",
     )
-    parser.add_argument(  # CHANGE: Segments dataset argument
+    parser.add_argument(
         "--segments-csv",
         type=Path,
         default=DEFAULT_SEGMENTS_CSV,
         help="Segment-level dataset produced by phase2A.",
     )
-    parser.add_argument(  # CHANGE: Models directory argument
+    parser.add_argument(
         "--models-dir",
         type=Path,
         default=DEFAULT_MODELS_DIR,
-        help="Directory to store trained parameter models.",
+        help="Directory to store trained models.",
     )
-    parser.add_argument(  # CHANGE: Metrics output argument
+    parser.add_argument(
         "--metrics-path",
         type=Path,
         default=DEFAULT_METRICS_PATH,
-        help="Path to write consolidated performance metrics.",
+        help="Path to write aggregate model metrics.",
     )
-    parser.add_argument(  # CHANGE: Minimum folds argument
+    parser.add_argument(
+        "--diagnostics-dir",
+        type=Path,
+        default=DEFAULT_DIAGNOSTICS_DIR,
+        help="Directory for diagnostics CSV outputs.",
+    )
+    parser.add_argument(
         "--min-folds",
         type=int,
         default=3,
-        help="Minimum number of cross-validation folds when possible.",
+        help="Minimum number of group-aware folds for cross-validation.",
     )
-    parser.add_argument(  # CHANGE: Smoothness penalty argument
-        "--smoothness-alpha",
-        type=float,
-        default=0.1,
-        help="Penalty weight for monotonicity violations during model selection.",
-    )
-    parser.add_argument(  # CHANGE: Config path argument
-        "--config",
-        type=Path,
-        default=None,
-        help="Optional JSON/YAML config file with overrides.",
-    )
-    parser.add_argument(  # CHANGE: Log level argument
-        "--log-level",
-        type=str,
-        default="INFO",
-        help="Logging level (e.g., INFO, DEBUG).",
-    )
-    parser.add_argument(  # CHANGE: Log directory argument
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=DEFAULT_LOG_DIR,
         help="Directory for log files.",
     )
-    return parser.parse_args()  # CHANGE: Return parsed args
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="Logging level (e.g., INFO, DEBUG).",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional JSON/YAML config file providing overrides.",
+    )
+    return parser.parse_args()
 
 
-def evaluate_estimators(
+def make_estimator() -> HistGradientBoostingRegressor:
+    return HistGradientBoostingRegressor(
+        max_depth=3,
+        learning_rate=0.05,
+        max_iter=400,
+        l2_regularization=0.0,
+        random_state=42,
+    )
+
+
+def evaluate_cv(
+    estimator: HistGradientBoostingRegressor,
     X: pd.DataFrame,
-    y: np.ndarray,
-    *,
-    estimators: Dict[str, object],
+    y_transformed: np.ndarray,
+    spec: TargetSpec,
+    groups: np.ndarray,
     min_folds: int,
-    smoothness_alpha: float,
-    target: str,
-    order_index: np.ndarray,
+) -> Tuple[List[Dict[str, float]], int]:
+    unique_groups = np.unique(groups)
+    n_groups = unique_groups.size
+    n_splits = min(n_groups, max(min_folds, 2)) if n_groups >= 2 else 0
+    if n_splits < 2:
+        return [], 0
+
+    gkf = GroupKFold(n_splits=n_splits)
+    fold_metrics: List[Dict[str, float]] = []
+    for fold_index, (train_idx, test_idx) in enumerate(gkf.split(X, y_transformed, groups)):
+        model = make_estimator()
+        model.fit(X.iloc[train_idx], y_transformed[train_idx])
+        preds_transformed = model.predict(X.iloc[test_idx])
+        preds = spec.inverse(np.asarray(preds_transformed, dtype=float))
+        truth = spec.inverse(y_transformed[test_idx])
+        rmse = mean_squared_error(truth, preds, squared=False)
+        mae = mean_absolute_error(truth, preds)
+        fold_metrics.append({
+            "fold": fold_index,
+            "rmse": float(rmse),
+            "mae": float(mae),
+        })
+    return fold_metrics, n_splits
+
+
+def fit_and_record(
+    df: pd.DataFrame,
+    features: pd.DataFrame,
+    spec: TargetSpec,
+    models_dir: Path,
+    min_folds: int,
+    groups: np.ndarray,
     logger,
-) -> tuple[str, dict[str, dict[str, object]]]:  # CHANGE: Evaluation helper signature
-    results: dict[str, dict[str, object]] = {}  # CHANGE: Results container
-    best_name = None  # CHANGE: Best estimator tracker
-    best_score = np.inf  # CHANGE: Best score tracker
+) -> Tuple[Dict[str, Any], pd.Series, Dict[str, Any], pd.DataFrame]:
+    y_raw = df[spec.column].to_numpy(dtype=float)
+    y_transformed = spec.forward(y_raw)
 
-    if order_index.size == 0:  # CHANGE: Fallback ordering
-        order_index = np.arange(len(X))  # CHANGE: Default order
+    estimator = make_estimator()
+    estimator.fit(features, y_transformed)
+    preds_transformed = estimator.predict(features)
+    preds_main = spec.inverse(np.asarray(preds_transformed, dtype=float))
 
-    for name, pipeline in estimators.items():  # CHANGE: Iterate estimators
-        logger.debug("Evaluating estimator %s for target %s", name, target)  # CHANGE: Debug log
-        estimator = pipeline  # CHANGE: Default estimator
-        if target == "b":  # CHANGE: Apply signed log transform for b
-            estimator = TransformedTargetRegressor(
-                regressor=pipeline,
-                func=signed_log1p,
-                inverse_func=inverse_signed_log1p,
-                check_inverse=False,
-            )  # CHANGE: Transform target
+    extra_outputs: Dict[str, np.ndarray] = {}
+    if "pred_b_pos" in spec.extra_outputs:
+        extra_outputs["pred_b_pos"] = np.asarray(preds_transformed, dtype=float)
 
-        n_samples = len(X)  # CHANGE: Sample count
-        cv_folds = min(max(min_folds, 2), n_samples) if n_samples >= 2 else 0  # CHANGE: Fold calculation
-        metrics = {
-            "parameter": target,
-            "model_name": name,
-            "n_samples": n_samples,
-            "cv_folds": cv_folds,
+    train_rmse = float(mean_squared_error(spec.inverse(y_transformed), preds_main, squared=False))
+    train_mae = float(mean_absolute_error(spec.inverse(y_transformed), preds_main))
+
+    fold_metrics, n_splits = evaluate_cv(estimator, features, y_transformed, spec, groups, min_folds)
+    if fold_metrics:
+        cv_rmse = [fold["rmse"] for fold in fold_metrics]
+        cv_mae = [fold["mae"] for fold in fold_metrics]
+        cv_summary = {
+            "mean_rmse": float(np.mean(cv_rmse)),
+            "std_rmse": float(np.std(cv_rmse, ddof=0)),
+            "mean_mae": float(np.mean(cv_mae)),
+            "std_mae": float(np.std(cv_mae, ddof=0)),
+        }
+    else:
+        cv_summary = {
             "mean_rmse": float("nan"),
             "std_rmse": float("nan"),
-            "mean_r2": float("nan"),
-            "std_r2": float("nan"),
-            "train_rmse": float("nan"),
-            "monotonicity_violations": 0,
-            "penalty": 0.0,
-        }  # CHANGE: Metrics skeleton
-
-        if cv_folds >= 2:  # CHANGE: Cross-validation branch
-            cv = KFold(n_splits=cv_folds, shuffle=True, random_state=42)  # CHANGE: KFold setup
-            scores = cross_validate(
-                estimator,
-                X,
-                y,
-                scoring={
-                    "neg_root_mean_squared_error": "neg_root_mean_squared_error",
-                    "r2": "r2",
-                },
-                cv=cv,
-                n_jobs=-1,
-                return_estimator=False,
-                error_score="raise",
-            )  # CHANGE: Perform CV
-            rmse = -scores["test_neg_root_mean_squared_error"]  # CHANGE: RMSE extraction
-            r2 = scores["test_r2"]  # CHANGE: R2 extraction
-            metrics.update(
-                {
-                    "mean_rmse": float(rmse.mean()),
-                    "std_rmse": float(rmse.std(ddof=0)),
-                    "mean_r2": float(r2.mean()),
-                    "std_r2": float(r2.std(ddof=0)),
-                }
-            )  # CHANGE: Update metrics
-
-        fitted = clone(estimator).fit(X, y)  # CHANGE: Fit cloned estimator
-        preds = fitted.predict(X)  # CHANGE: Predictions on training data
-        metrics["train_rmse"] = compute_rmse(y, preds)  # CHANGE: Train RMSE
-
-        sorted_preds = preds[order_index]  # CHANGE: Order predictions
-        violations = count_monotonicity_violations(sorted_preds, direction="decreasing")  # CHANGE: Monotonic violations
-        metrics["monotonicity_violations"] = int(violations)  # CHANGE: Record violations
-        metrics["penalty"] = float(smoothness_alpha * violations)  # CHANGE: Penalty term
-
-        score_base = metrics["mean_rmse"] if np.isfinite(metrics["mean_rmse"]) else metrics["train_rmse"]  # CHANGE: Base score
-        score = float(score_base + metrics["penalty"])  # CHANGE: Apply penalty
-        logger.debug(
-            "Estimator %s: score=%s, mean_rmse=%s, penalty=%s",
-            name,
-            score,
-            metrics["mean_rmse"],
-            metrics["penalty"],
-        )  # CHANGE: Debug log
-
-        results[name] = {"metrics": metrics, "estimator": fitted}  # CHANGE: Store result
-
-        if np.isnan(score):  # CHANGE: Handle NaN score
-            if best_name is None:  # CHANGE: Default fallback
-                best_name = name  # CHANGE: Set best estimator
-        elif score < best_score:  # CHANGE: Compare scores
-            best_score = score  # CHANGE: Update best score
-            best_name = name  # CHANGE: Update best estimator
-
-    assert best_name is not None  # CHANGE: Ensure best estimator found
-    return best_name, results  # CHANGE: Return evaluation outcome
-
-
-def main() -> None:  # CHANGE: Main entrypoint
-    args = parse_args()  # CHANGE: Parse CLI args
-    config = load_config(args.config)  # CHANGE: Load optional config
-    section = extract_config_section(config, "phase2B")  # CHANGE: Phase2B config section
-
-    segments_path = Path(section.get("segments_csv", args.segments_csv))  # CHANGE: Segments path resolution
-    models_dir = Path(section.get("models_dir", args.models_dir))  # CHANGE: Models directory resolution
-    metrics_path = Path(section.get("metrics_path", args.metrics_path))  # CHANGE: Metrics path resolution
-    min_folds = int(section.get("min_folds", args.min_folds))  # CHANGE: Minimum folds resolution
-    smoothness_alpha = float(section.get("smoothness_alpha", args.smoothness_alpha))  # CHANGE: Penalty resolution
-    log_dir = Path(section.get("log_dir", args.log_dir))  # CHANGE: Log directory resolution
-    log_level = section.get("log_level", args.log_level)  # CHANGE: Log level resolution
-
-    if not segments_path.exists():  # CHANGE: Validate segments file
-        raise FileNotFoundError(f"Segments CSV not found: {segments_path}")  # CHANGE: Error message
-
-    ensure_directory(models_dir)  # CHANGE: Ensure models directory
-    ensure_directory(metrics_path.parent)  # CHANGE: Ensure metrics directory
-    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"  # CHANGE: Log path resolution
-    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)  # CHANGE: Configure logger
-
-    df = pd.read_csv(segments_path)  # CHANGE: Load segments dataset
-    missing_features = [col for col in RAW_FEATURE_COLUMNS if col not in df.columns]  # CHANGE: Validate features
-    if missing_features:  # CHANGE: Missing features guard
-        raise KeyError("Segments dataset missing required columns: " + ", ".join(missing_features))  # CHANGE: Error message
-
-    feature_frame = prepare_feature_frame(df)  # CHANGE: Build feature frame
-
-    estimators = make_baseline_estimators()  # CHANGE: Instantiate estimators
-    metrics_records: list[dict[str, object]] = []  # CHANGE: Metrics list
-
-    for target in ("k", "n", "b"):  # CHANGE: Iterate targets
-        if target not in df.columns:  # CHANGE: Guard missing target
-            raise KeyError(f"Target column '{target}' missing from segments dataset")  # CHANGE: Error
-
-        y = pd.to_numeric(df[target], errors="coerce").to_numpy(dtype=float)  # CHANGE: Target vector
-        mask = np.isfinite(y)  # CHANGE: Finite mask
-        X = feature_frame.loc[mask, ALL_FEATURE_COLUMNS]  # CHANGE: Filtered features
-        y_valid = y[mask]  # CHANGE: Filtered target
-
-        if len(X) == 0:  # CHANGE: Guard empty training set
-            logger.warning("No valid samples for %s; skipping training", target.upper())  # CHANGE: Warning log
-            continue  # CHANGE: Skip target
-
-        subset_df = df.loc[mask].copy()  # CHANGE: Subset for ordering
-        ordered_subset = subset_df.sort_values(["dataset_name", "segment_start_time"]).index.to_numpy()  # CHANGE: Ordered subset
-        order_index = X.index.get_indexer(ordered_subset)  # CHANGE: Position mapping
-        order_index = order_index[order_index >= 0]  # CHANGE: Filter valid indices
-        order_index = order_index.astype(int, copy=False)  # CHANGE: Ensure integer dtype
-
-        logger.info("Training regressors for %s with %s samples", target.upper(), len(X))  # CHANGE: Info log
-
-        best_name, results = evaluate_estimators(
-            X,
-            y_valid,
-            estimators=estimators,
-            min_folds=min_folds,
-            smoothness_alpha=smoothness_alpha,
-            target=target,
-            order_index=order_index,
-            logger=logger,
-        )  # CHANGE: Evaluate estimators
-
-        for name, payload in results.items():  # CHANGE: Collect metrics
-            metrics = dict(payload["metrics"])  # CHANGE: Copy metrics
-            metrics["is_best"] = name == best_name  # CHANGE: Flag best model
-            metrics_records.append(metrics)  # CHANGE: Append metrics
-
-        final_model = results[best_name]["estimator"]  # CHANGE: Retrieve best estimator
-        final_model.fit(X, y_valid)  # CHANGE: Fit on full data
-
-        artifact = {  # CHANGE: Model artifact payload
-            "model": final_model,
-            "raw_feature_columns": RAW_FEATURE_COLUMNS,
-            "all_feature_columns": ALL_FEATURE_COLUMNS,
-            "target": target,
-            "smoothness_alpha": smoothness_alpha,
+            "mean_mae": float("nan"),
+            "std_mae": float("nan"),
         }
 
-        model_path = models_dir / f"{target}_model.pkl"  # CHANGE: Model path
-        dump(artifact, model_path)  # CHANGE: Persist model
-        logger.info("Saved best model %s for %s to %s", best_name, target.upper(), model_path)  # CHANGE: Log save
+    artifact = {
+        "model": estimator,
+        "all_feature_columns": list(features.columns),
+        "target": spec.name,
+        "target_transform": spec.transform,
+        "prediction_column": spec.pred_column,
+        "extra_prediction_columns": spec.extra_outputs,
+    }
 
-    metrics_df = pd.DataFrame(metrics_records)  # CHANGE: Metrics DataFrame
-    metrics_df.sort_values(["parameter", "mean_rmse"], inplace=True)  # CHANGE: Sort metrics
-    metrics_df.to_csv(metrics_path, index=False)  # CHANGE: Write metrics CSV
-    logger.info("Wrote consolidated metrics to %s", metrics_path)  # CHANGE: Log metrics path
+    artifact_path = ensure_directory(models_dir) / f"{spec.name}_model.pkl"
+    dump(artifact, artifact_path)
+    logger.info("Saved %s model to %s", spec.name, artifact_path)
+
+    metrics_record = {
+        "parameter": spec.name,
+        "n_segments": int(len(df)),
+        "train_rmse": train_rmse,
+        "train_mae": train_mae,
+        "cv_folds": n_splits,
+        **cv_summary,
+    }
+
+    predictions = pd.Series(preds_main, index=df.index, name=spec.pred_column)
+    feature_importances = getattr(estimator, "feature_importances_", None)
+    importance_df = pd.DataFrame()
+    if feature_importances is not None:
+        importance_df = pd.DataFrame(
+            {
+                "parameter": spec.name,
+                "feature": features.columns,
+                "importance": feature_importances,
+            }
+        )
+
+    return metrics_record, predictions, extra_outputs, importance_df
 
 
-if __name__ == "__main__":  # CHANGE: Script guard
-    main()  # CHANGE: Invoke main
+def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+    section = extract_config_section(config, "phase2B")
+
+    segments_path = Path(section.get("segments_csv", args.segments_csv))
+    models_dir = Path(section.get("models_dir", args.models_dir))
+    metrics_path = Path(section.get("metrics_path", args.metrics_path))
+    diagnostics_dir = Path(section.get("diagnostics_dir", args.diagnostics_dir))
+    min_folds = int(section.get("min_folds", args.min_folds))
+    log_dir = Path(section.get("log_dir", args.log_dir))
+    log_level = section.get("log_level", args.log_level)
+
+    ensure_directory(models_dir)
+    ensure_directory(metrics_path.parent)
+    ensure_directory(diagnostics_dir)
+    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"
+    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)
+
+    df = pd.read_csv(segments_path)
+    missing_targets = REQUIRED_TARGET_COLUMNS - set(df.columns)
+    if missing_targets:
+        raise KeyError(f"Missing target columns in segments dataset: {sorted(missing_targets)}")
+
+    features = prepare_feature_frame(df)
+    feature_columns = [col for col in ALL_FEATURE_COLUMNS if col in features.columns]
+    features = features[feature_columns]
+    groups = df["dataset_name"].astype(str).to_numpy()
+
+    metrics: List[Dict[str, Any]] = []
+    predictions_frame = df[["dataset_name", "segment_index"]].copy()
+    feature_importances_list: List[pd.DataFrame] = []
+    residual_records: List[Dict[str, Any]] = []
+
+    for spec in TARGET_SPECS.values():
+        metrics_record, predictions, extra_outputs, importance_df = fit_and_record(
+            df,
+            features,
+            spec,
+            models_dir,
+            min_folds,
+            groups,
+            logger,
+        )
+        metrics.append(metrics_record)
+        predictions_frame[spec.pred_column] = predictions
+        if "pred_b_pos" in extra_outputs:
+            predictions_frame["pred_b_pos"] = extra_outputs["pred_b_pos"]
+        if not importance_df.empty:
+            feature_importances_list.append(importance_df)
+
+        preds = predictions.to_numpy(dtype=float)
+        if spec.name == "b" and "pred_b_pos" in predictions_frame.columns:
+            preds = spec.inverse(predictions_frame["pred_b_pos"].to_numpy(dtype=float))
+        truth = df[spec.column].to_numpy(dtype=float)
+        residuals = preds - truth
+        residuals_df = pd.DataFrame(
+            {
+                "dataset_name": df["dataset_name"],
+                "residual": residuals,
+            }
+        )
+        grouped = residuals_df.groupby("dataset_name")
+        for dataset_name, group in grouped:
+            residual_records.append(
+                {
+                    "dataset_name": dataset_name,
+                    "parameter": spec.name,
+                    "rmse": float(np.sqrt(np.mean(group["residual"] ** 2))),
+                    "mae": float(np.mean(np.abs(group["residual"]))),
+                    "n_segments": int(group.shape[0]),
+                }
+            )
+
+    metrics_df = pd.DataFrame(metrics)
+    metrics_df.to_csv(metrics_path, index=False, float_format="%.9g")
+
+    predictions_path = diagnostics_dir / "phase2B_training_predictions.csv"
+    predictions_frame.to_csv(predictions_path, index=False, float_format="%.9g")
+
+    residuals_df = pd.DataFrame(residual_records)
+    residuals_path = diagnostics_dir / "phase2B_residuals_by_dataset.csv"
+    residuals_df.to_csv(residuals_path, index=False, float_format="%.9g")
+
+    if feature_importances_list:
+        feature_importances_df = pd.concat(feature_importances_list, ignore_index=True)
+        importances_path = diagnostics_dir / "phase2B_feature_importances.csv"
+        feature_importances_df.to_csv(importances_path, index=False, float_format="%.9g")
+
+    logger.info("Metrics written to %s", metrics_path)
+    logger.info("Predictions written to %s", predictions_path)
+    logger.info("Residual diagnostics written to %s", residuals_path)
+
+
+if __name__ == "__main__":
+    main()
