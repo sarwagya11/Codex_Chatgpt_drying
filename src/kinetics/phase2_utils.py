@@ -17,25 +17,41 @@ try:  # CHANGE: Optional YAML config support
 except ImportError:  # CHANGE: Handle missing dependency
     HAVE_YAML = False  # CHANGE: YAML unavailable fallback
 
-RAW_FEATURE_COLUMNS: list[str] = [  # CHANGE: Raw feature definitions retained
-    "T",  # CHANGE: Temperature
-    "RH",  # CHANGE: Relative humidity
-    "velocity",  # CHANGE: Air velocity
-    "thickness",  # CHANGE: Sample thickness
-    "segment_position",  # CHANGE: Segment depth indicator
-    "segment_duration",  # CHANGE: Segment duration
+BASE_FEATURE_COLUMNS: list[str] = [
+    "T",
+    "RH",
+    "velocity",
+    "thickness",
+    "segment_duration",
+    "segment_position",
 ]
-"""Columns expected to be present in the raw segment datasets."""  # CHANGE: Docstring retained
+"""Core feature columns required for parameter modelling."""
 
-ENGINEERED_FEATURE_COLUMNS: list[str] = [  # CHANGE: Engineered feature list
-    "inv_thickness_sq",  # CHANGE: Thickness reciprocal square
-    "T_RH_ratio",  # CHANGE: Temperature to humidity ratio
-    "temp_vel",  # CHANGE: Temperature * velocity interaction
+OPTIONAL_FEATURE_COLUMNS: list[str] = [
+    "segment_mid_time",
+    "join_gap",
+    "left_slope",
+    "right_slope",
+    "resid_rms_segment",
+    "lowess_curvature",
+    "lowess_amplitude",
+    "is_root",
+    "is_leaf",
+    "min_points_constraint_hit",
 ]
-"""Derived features computed from the raw drying-condition inputs."""  # CHANGE: Docstring retained
+"""Auxiliary structural features populated when available."""
 
-ALL_FEATURE_COLUMNS: list[str] = RAW_FEATURE_COLUMNS + ENGINEERED_FEATURE_COLUMNS  # CHANGE: Feature union
-"""Full set of model features (raw + engineered)."""  # CHANGE: Docstring retained
+ENGINEERED_FEATURE_COLUMNS: list[str] = [
+    "inv_thickness_sq",
+    "T_RH_ratio",
+    "temp_vel",
+]
+"""Derived interactions computed from the physical drying conditions."""
+
+ALL_FEATURE_COLUMNS: list[str] = (
+    BASE_FEATURE_COLUMNS + OPTIONAL_FEATURE_COLUMNS + ENGINEERED_FEATURE_COLUMNS
+)
+"""Full set of model features (raw + optional + engineered)."""
 
 
 def load_config(config_path: Path | None) -> Dict[str, Any]:  # CHANGE: Config loader helper
@@ -144,34 +160,43 @@ def resolve_dataset_path(raw_path: str | Path, data_root: Path) -> Path:  # CHAN
     raise FileNotFoundError(f"Could not resolve dataset path from {raw_path!r}")  # CHANGE: Error
 
 
-def prepare_feature_frame(raw_segments: pd.DataFrame) -> pd.DataFrame:  # CHANGE: Feature engineering retained
-    """Return a design matrix with engineered features for modelling."""  # CHANGE: Docstring retained
+def prepare_feature_frame(raw_segments: pd.DataFrame) -> pd.DataFrame:
+    """Return a design matrix with engineered features for modelling."""
 
-    missing = [col for col in RAW_FEATURE_COLUMNS if col not in raw_segments.columns]  # CHANGE: Missing columns
-    if missing:  # CHANGE: Guard missing features
+    missing = [col for col in BASE_FEATURE_COLUMNS if col not in raw_segments.columns]
+    if missing:
         raise KeyError(
-            "Missing required columns for feature engineering: " + ", ".join(missing)
-        )  # CHANGE: Error message
+            "Missing required columns for feature engineering: " + ", ".join(sorted(missing))
+        )
 
-    features = pd.DataFrame(index=raw_segments.index)  # CHANGE: Initialize frame
-    for column in RAW_FEATURE_COLUMNS:  # CHANGE: Iterate raw columns
-        features[column] = pd.to_numeric(raw_segments[column], errors="coerce")  # CHANGE: Coerce numeric
+    features = pd.DataFrame(index=raw_segments.index)
+    for column in BASE_FEATURE_COLUMNS:
+        features[column] = pd.to_numeric(raw_segments[column], errors="coerce")
 
-    thickness = features["thickness"].to_numpy(dtype=float)  # CHANGE: Thickness array
-    with np.errstate(divide="ignore", invalid="ignore"):  # CHANGE: Manage warnings
-        inv_sq = np.where(thickness != 0, 1.0 / np.square(thickness), np.nan)  # CHANGE: Compute
-    features["inv_thickness_sq"] = inv_sq  # CHANGE: Assign feature
+    for column in OPTIONAL_FEATURE_COLUMNS:
+        if column in raw_segments.columns:
+            values = pd.to_numeric(raw_segments[column], errors="coerce")
+        else:
+            values = pd.Series(0.0, index=raw_segments.index, dtype=float)
+        if column in {"is_root", "is_leaf", "min_points_constraint_hit"}:
+            values = values.fillna(0.0).astype(float)
+        features[column] = values
 
-    rh = features["RH"].to_numpy(dtype=float)  # CHANGE: RH array
-    temperature = features["T"].to_numpy(dtype=float)  # CHANGE: Temp array
-    with np.errstate(divide="ignore", invalid="ignore"):  # CHANGE: Manage warnings
-        ratio = np.where(rh != 0, temperature / rh, np.nan)  # CHANGE: Compute ratio
-    features["T_RH_ratio"] = ratio  # CHANGE: Assign feature
+    thickness = features["thickness"].to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inv_sq = np.where(thickness != 0, 1.0 / np.square(thickness), np.nan)
+    features["inv_thickness_sq"] = inv_sq
 
-    velocity = features["velocity"].to_numpy(dtype=float)  # CHANGE: Velocity array
-    features["temp_vel"] = temperature * velocity  # CHANGE: Interaction feature
+    rh = features["RH"].to_numpy(dtype=float)
+    temperature = features["T"].to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(rh != 0, temperature / rh, np.nan)
+    features["T_RH_ratio"] = ratio
 
-    return features  # CHANGE: Return engineered frame
+    velocity = features["velocity"].to_numpy(dtype=float)
+    features["temp_vel"] = temperature * velocity
+
+    return features
 
 
 def signed_log1p(values: Iterable[float] | np.ndarray) -> np.ndarray:  # CHANGE: Signed log transform retained
@@ -193,3 +218,42 @@ def midilli_curve(time: Iterable[float] | np.ndarray, k: float, n: float, b: flo
 
     t = np.asarray(time, dtype=float)  # CHANGE: Convert to ndarray
     return np.exp(-k * np.power(t, n)) + b * t  # CHANGE: Evaluate curve
+
+
+def midilli_derivative(time: Iterable[float] | np.ndarray, k: float, n: float, b: float) -> np.ndarray:
+    """Return the derivative of the Midilli model with respect to time."""
+
+    t = np.asarray(time, dtype=float)
+    safe_time = np.maximum(t, 1e-12)
+    base = np.exp(-k * np.power(safe_time, n))
+    derivative = -k * n * np.power(safe_time, n - 1.0) * base + b
+    derivative = np.where(t <= 0.0, b, derivative)
+    return derivative
+
+
+def softplus(values: Iterable[float] | np.ndarray) -> np.ndarray:
+    """Numerically stable softplus transform."""
+
+    arr = np.asarray(values, dtype=float)
+    with np.errstate(over="ignore", invalid="ignore"):
+        positive_mask = arr > 20
+        result = np.where(positive_mask, arr, np.log1p(np.exp(arr)))
+    return result
+
+
+def inverse_softplus(values: Iterable[float] | np.ndarray) -> np.ndarray:
+    """Inverse of :func:`softplus` for positive inputs."""
+
+    arr = np.asarray(values, dtype=float)
+    arr = np.maximum(arr, 1e-12)
+    with np.errstate(over="ignore", invalid="ignore"):
+        large = arr > 20
+        inverse = np.where(large, arr + np.log1p(-np.exp(-arr)), np.log(np.expm1(arr)))
+    return inverse
+
+
+def clip_mr(values: Iterable[float] | np.ndarray, *, low: float = 0.0, high: float = 1.1) -> np.ndarray:
+    """Clip moisture-ratio values into the physically valid range."""
+
+    arr = np.asarray(values, dtype=float)
+    return np.clip(arr, low, high)

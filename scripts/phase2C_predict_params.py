@@ -1,213 +1,240 @@
-"""Predict Midilli parameters for new drying segments."""  # CHANGE: Updated script header
+"""Predict Midilli parameters for each segment and pre-check continuity."""
 
-from __future__ import annotations  # CHANGE: Future annotations retained
+from __future__ import annotations
 
-import argparse  # CHANGE: CLI parsing import
-from pathlib import Path  # CHANGE: Path handling
-from typing import Any, Dict  # CHANGE: Typing helpers
+import argparse
+from pathlib import Path
+from typing import Any, Dict, Tuple
 
-import numpy as np  # CHANGE: Numerical operations
-import pandas as pd  # CHANGE: DataFrame handling
-from joblib import load  # CHANGE: Model loading
+import numpy as np
+import pandas as pd
+from joblib import load
 
-import sys  # CHANGE: Ensure project importability
+import sys
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]  # CHANGE: Project root
-_SRC_ROOT = _PROJECT_ROOT / "src"  # CHANGE: Source directory
-for candidate in (_PROJECT_ROOT, _SRC_ROOT):  # CHANGE: Extend sys.path loop
-    candidate_str = str(candidate)  # CHANGE: Convert to string
-    if candidate_str not in sys.path:  # CHANGE: Avoid duplicates
-        sys.path.insert(0, candidate_str)  # CHANGE: Insert path
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SRC_ROOT = _PROJECT_ROOT / "src"
+for candidate in (_PROJECT_ROOT, _SRC_ROOT):
+    candidate_str = str(candidate)
+    if candidate_str not in sys.path:
+        sys.path.insert(0, candidate_str)
 
-from kinetics.metrics import segment_discontinuities  # noqa: E402  # CHANGE: Continuity diagnostics
-from kinetics.phase2_utils import (  # noqa: E402  # CHANGE: Shared utilities import
-    ALL_FEATURE_COLUMNS,  # CHANGE: Feature columns
-    configure_logging,  # CHANGE: Logger factory
-    ensure_directory,  # CHANGE: Directory helper
-    extract_config_section,  # CHANGE: Config section helper
-    load_config,  # CHANGE: Config loader
-    midilli_curve,  # CHANGE: Midilli evaluation
-    prepare_feature_frame,  # CHANGE: Feature engineering
-)  # CHANGE: Utilities import
+from kinetics.metrics import segment_discontinuities  # noqa: E402
+from kinetics.phase2_utils import (  # noqa: E402
+    ALL_FEATURE_COLUMNS,
+    clip_mr,
+    configure_logging,
+    ensure_directory,
+    extract_config_section,
+    load_config,
+    midilli_curve,
+    prepare_feature_frame,
+    inverse_softplus,
+)  # noqa: E402
 
-DEFAULT_INPUT_CSV = _PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv"  # CHANGE: Default dataset path
-DEFAULT_MODELS_DIR = _PROJECT_ROOT / "outputs" / "phase2" / "models"  # CHANGE: Models directory
-DEFAULT_OUTPUT_PATH = _PROJECT_ROOT / "outputs" / "phase2" / "predicted_params.csv"  # CHANGE: Output path
-DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"  # CHANGE: Diagnostics directory
-DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"  # CHANGE: Log directory
-DEFAULT_LOGGER_NAME = "phase2.phase2C"  # CHANGE: Logger name constant
+DEFAULT_INPUT_CSV = _PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv"
+DEFAULT_MODELS_DIR = _PROJECT_ROOT / "outputs" / "phase2" / "models"
+DEFAULT_OUTPUT_PATH = _PROJECT_ROOT / "outputs" / "phase2" / "predicted_params.csv"
+DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"
+DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"
+DEFAULT_LOGGER_NAME = "phase2.phase2C"
 
-REQUIRED_TIMING_COLUMNS = {"segment_start_time", "segment_duration"}  # CHANGE: Timing requirements
-REQUIRED_RAW_FEATURES = {"T", "RH", "velocity", "thickness", "segment_position"}  # CHANGE: Feature requirements
-BOUNDARY_COLUMNS = {"segment_start_MR", "segment_end_MR"}  # CHANGE: Boundary requirements
+REQUIRED_COLUMNS = {
+    "dataset_name",
+    "segment_index",
+    "segment_start_time",
+    "segment_end_time",
+    "segment_duration",
+}
 
 
-def parse_args() -> argparse.Namespace:  # CHANGE: CLI parser definition
-    parser = argparse.ArgumentParser(  # CHANGE: Parser creation
-        description="Use trained regressors to predict Midilli parameters.",  # CHANGE: Description update
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Use trained models to predict Midilli parameters and continuity gaps.",
     )
-    parser.add_argument(  # CHANGE: Input CSV argument
+    parser.add_argument(
         "--input-csv",
         type=Path,
         default=DEFAULT_INPUT_CSV,
-        help="CSV containing segment descriptors for prediction.",
+        help="Segment-level dataset produced by phase2A.",
     )
-    parser.add_argument(  # CHANGE: Models directory argument
+    parser.add_argument(
         "--models-dir",
         type=Path,
         default=DEFAULT_MODELS_DIR,
-        help="Directory with trained parameter models (from phase2B).",
+        help="Directory containing trained parameter models (phase2B).",
     )
-    parser.add_argument(  # CHANGE: Output path argument
+    parser.add_argument(
         "--output-path",
         type=Path,
         default=DEFAULT_OUTPUT_PATH,
         help="Destination CSV for predicted parameters.",
     )
-    parser.add_argument(  # CHANGE: Diagnostics directory argument
+    parser.add_argument(
         "--diagnostics-dir",
         type=Path,
         default=DEFAULT_DIAGNOSTICS_DIR,
         help="Directory for continuity diagnostics.",
     )
-    parser.add_argument(  # CHANGE: Continuity threshold argument
+    parser.add_argument(
         "--continuity-threshold",
         type=float,
         default=0.02,
-        help="Normalized gap threshold to flag discontinuities.",
+        help="Absolute MR gap threshold used to flag continuity violations.",
     )
-    parser.add_argument(  # CHANGE: Config path argument
-        "--config",
-        type=Path,
-        default=None,
-        help="Optional JSON/YAML config file with overrides.",
-    )
-    parser.add_argument(  # CHANGE: Log level argument
-        "--log-level",
-        type=str,
-        default="INFO",
-        help="Logging level (e.g., INFO, DEBUG).",
-    )
-    parser.add_argument(  # CHANGE: Log directory argument
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=DEFAULT_LOG_DIR,
         help="Directory for log files.",
     )
-    return parser.parse_args()  # CHANGE: Return parsed args
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="Logging level (e.g., INFO, DEBUG).",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional JSON/YAML config file with overrides.",
+    )
+    return parser.parse_args()
 
 
-def load_artifact(path: Path) -> Dict[str, Any]:  # CHANGE: Artifact loader helper
-    if not path.exists():  # CHANGE: Guard missing file
-        raise FileNotFoundError(f"Model artifact missing: {path}")  # CHANGE: Error message
-    artifact: Dict[str, Any] = load(path)  # CHANGE: Load artifact
-    if "model" not in artifact:  # CHANGE: Validate contents
-        raise KeyError(f"Model artifact at {path} is missing the 'model' entry")  # CHANGE: Error message
-    return artifact  # CHANGE: Return artifact
+def load_artifact(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Model artifact missing: {path}")
+    artifact: Dict[str, Any] = load(path)
+    if "model" not in artifact:
+        raise KeyError(f"Model artifact at {path} is missing the 'model' entry")
+    if "all_feature_columns" not in artifact:
+        raise KeyError(f"Model artifact at {path} is missing 'all_feature_columns'")
+    return artifact
 
 
-def main() -> None:  # CHANGE: Main entrypoint
-    args = parse_args()  # CHANGE: Parse CLI args
-    config = load_config(args.config)  # CHANGE: Load optional config
-    section = extract_config_section(config, "phase2C")  # CHANGE: Phase2C config section
+def postprocess_predictions(
+    preds_transformed: np.ndarray,
+    transform: str,
+) -> Tuple[np.ndarray, np.ndarray | None]:
+    if transform == "log":
+        preds = np.exp(preds_transformed)
+        return preds, None
+    if transform == "softplus":
+        preds_pos = preds_transformed
+        preds = inverse_softplus(preds_pos)
+        return preds, preds_pos
+    return preds_transformed, None
 
-    input_path = Path(section.get("input_csv", args.input_csv))  # CHANGE: Input path resolution
-    models_dir = Path(section.get("models_dir", args.models_dir))  # CHANGE: Models directory resolution
-    output_path = Path(section.get("output_path", args.output_path))  # CHANGE: Output path resolution
-    diagnostics_dir = Path(section.get("diagnostics_dir", args.diagnostics_dir))  # CHANGE: Diagnostics directory resolution
-    continuity_threshold = float(section.get("continuity_threshold", args.continuity_threshold))  # CHANGE: Threshold resolution
-    log_dir = Path(section.get("log_dir", args.log_dir))  # CHANGE: Log directory resolution
-    log_level = section.get("log_level", args.log_level)  # CHANGE: Log level resolution
 
-    ensure_directory(output_path.parent)  # CHANGE: Ensure output directory
-    ensure_directory(diagnostics_dir)  # CHANGE: Ensure diagnostics directory
-    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"  # CHANGE: Log path resolution
-    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)  # CHANGE: Configure logger
+def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+    section = extract_config_section(config, "phase2C")
 
-    df = pd.read_csv(input_path)  # CHANGE: Load input dataset
-    logger.info("Loaded %s segments for prediction from %s", len(df), input_path)  # CHANGE: Log load
+    input_path = Path(section.get("input_csv", args.input_csv))
+    models_dir = Path(section.get("models_dir", args.models_dir))
+    output_path = Path(section.get("output_path", args.output_path))
+    diagnostics_dir = Path(section.get("diagnostics_dir", args.diagnostics_dir))
+    continuity_threshold = float(section.get("continuity_threshold", args.continuity_threshold))
+    log_dir = Path(section.get("log_dir", args.log_dir))
+    log_level = section.get("log_level", args.log_level)
 
-    missing_timing = REQUIRED_TIMING_COLUMNS - set(df.columns)  # CHANGE: Timing validation
-    if missing_timing:  # CHANGE: Guard missing timing
-        raise KeyError(f"Missing timing columns: {sorted(missing_timing)}")  # CHANGE: Error message
+    ensure_directory(output_path.parent)
+    ensure_directory(diagnostics_dir)
+    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"
+    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)
 
-    missing_features = REQUIRED_RAW_FEATURES - set(df.columns)  # CHANGE: Feature validation
-    if missing_features:  # CHANGE: Guard missing features
-        raise KeyError(f"Missing required features: {sorted(missing_features)}")  # CHANGE: Error message
+    df = pd.read_csv(input_path)
+    missing = REQUIRED_COLUMNS - set(df.columns)
+    if missing:
+        raise KeyError(f"Input dataset missing required columns: {sorted(missing)}")
 
-    missing_boundaries = BOUNDARY_COLUMNS - set(df.columns)  # CHANGE: Boundary validation
-    if missing_boundaries:  # CHANGE: Guard missing MR boundaries
-        raise KeyError(f"Missing MR boundary columns: {sorted(missing_boundaries)}")  # CHANGE: Error message
+    features = prepare_feature_frame(df)
+    X = features[[col for col in ALL_FEATURE_COLUMNS if col in features.columns]]
 
-    feature_frame = prepare_feature_frame(df)  # CHANGE: Build feature frame
+    predictions: Dict[str, np.ndarray] = {}
 
-    if feature_frame.isnull().any().any():  # CHANGE: Feature NaN check
-        logger.warning("NaNs found in input features — prediction quality may degrade.")  # CHANGE: Warning log
-        df["has_nan_features"] = feature_frame.isnull().any(axis=1)  # CHANGE: Flag NaNs
-    else:  # CHANGE: No NaNs branch
-        df["has_nan_features"] = False  # CHANGE: Flag default
+    for target in ("k", "n", "b"):
+        artifact_path = models_dir / f"{target}_model.pkl"
+        artifact = load_artifact(artifact_path)
+        model = artifact["model"]
+        model_features = artifact.get("all_feature_columns", [])
+        transform = artifact.get("target_transform", "identity")
+        pred_column = artifact.get("prediction_column", f"pred_{target}")
+        extra_cols = artifact.get("extra_prediction_columns", ())
 
-    predictions: Dict[str, np.ndarray] = {}  # CHANGE: Predictions container
-
-    for target in ("k", "n", "b"):  # CHANGE: Iterate targets
-        artifact_path = models_dir / f"{target}_model.pkl"  # CHANGE: Artifact path
-        artifact = load_artifact(artifact_path)  # CHANGE: Load artifact
-        model = artifact["model"]  # CHANGE: Extract model
-        model_features = artifact.get("all_feature_columns", ALL_FEATURE_COLUMNS)  # CHANGE: Feature list
-
-        missing_in_X = set(model_features) - set(feature_frame.columns)  # CHANGE: Feature expectation check
-        if missing_in_X:  # CHANGE: Guard missing columns
+        missing_features = [col for col in model_features if col not in X.columns]
+        if missing_features:
             raise ValueError(
-                f"Model for {target} expects missing columns: {sorted(missing_in_X)}"
-            )  # CHANGE: Error message
+                f"Model for {target} expects missing features: {missing_features}"
+            )
+        X_model = X[model_features]
+        preds_transformed = model.predict(X_model)
+        preds, extra = postprocess_predictions(np.asarray(preds_transformed, dtype=float), transform)
+        predictions[pred_column] = preds
+        if extra is not None and extra_cols:
+            predictions[extra_cols[0]] = np.asarray(extra, dtype=float)
+        logger.info("Generated predictions for %s", target.upper())
 
-        X = feature_frame[model_features]  # CHANGE: Feature subset
-        preds = model.predict(X)  # type: ignore[call-arg]  # CHANGE: Generate predictions
+    for column, values in predictions.items():
+        df[column] = values
 
-        if not np.all(np.isfinite(preds)):  # CHANGE: Finite guard
-            raise ValueError(f"Non-finite predictions detected in {target}")  # CHANGE: Error message
+    if "pred_b" not in df.columns and "pred_b_pos" in df.columns:
+        df["pred_b"] = inverse_softplus(df["pred_b_pos"].to_numpy(dtype=float))
 
-        predictions[f"pred_{target}"] = np.asarray(preds, dtype=float)  # CHANGE: Store predictions
-        logger.info("Generated predictions for %s", target.upper())  # CHANGE: Log prediction
+    if "segment_end_time" not in df.columns or df["segment_end_time"].isna().all():
+        df["segment_end_time"] = df["segment_start_time"] + df["segment_duration"]
 
-    for col, values in predictions.items():  # CHANGE: Attach predictions to DataFrame
-        df[col] = values  # CHANGE: Assign column
+    start_times = df["segment_start_time"].to_numpy(dtype=float)
+    end_times = df["segment_end_time"].to_numpy(dtype=float)
+    k_vals = df.get("pred_k").to_numpy(dtype=float)
+    n_vals = df.get("pred_n").to_numpy(dtype=float)
+    b_vals = df.get("pred_b").to_numpy(dtype=float)
 
-    if "segment_end_time" not in df.columns:  # CHANGE: Ensure end time column
-        df["segment_end_time"] = df["segment_start_time"] + df["segment_duration"]  # CHANGE: Compute end time
-
-    start_times = df["segment_start_time"].to_numpy(dtype=float)  # CHANGE: Start time array
-    end_times = df["segment_end_time"].to_numpy(dtype=float)  # CHANGE: End time array
-    k_vals = df["pred_k"].to_numpy(dtype=float)  # CHANGE: Predicted k array
-    n_vals = df["pred_n"].to_numpy(dtype=float)  # CHANGE: Predicted n array
-    b_vals = df["pred_b"].to_numpy(dtype=float)  # CHANGE: Predicted b array
-
-    df["pred_segment_start_MR"] = midilli_curve(start_times, k_vals, n_vals, b_vals)  # CHANGE: Predicted start MR
-    df["pred_segment_end_MR"] = midilli_curve(end_times, k_vals, n_vals, b_vals)  # CHANGE: Predicted end MR
+    df["pred_segment_start_MR"] = clip_mr(midilli_curve(start_times, k_vals, n_vals, b_vals))
+    df["pred_segment_end_MR"] = clip_mr(midilli_curve(end_times, k_vals, n_vals, b_vals))
 
     continuity_df = segment_discontinuities(
         df,
         start_col="pred_segment_start_MR",
         end_col="pred_segment_end_MR",
-    )  # CHANGE: Compute continuity diagnostics
-    if not continuity_df.empty:  # CHANGE: Annotate violations
-        continuity_df.rename(columns={"gap": "continuity_gap"}, inplace=True)  # CHANGE: Rename column
-        continuity_df["is_violation"] = continuity_df["continuity_gap"].astype(float) > continuity_threshold  # CHANGE: Flag
-        diagnostics_path = diagnostics_dir / "phase2C_discontinuities.csv"  # CHANGE: Diagnostics path
-        continuity_df.to_csv(diagnostics_path, index=False)  # CHANGE: Write diagnostics
+    )
+    diagnostics_path = diagnostics_dir / "phase2C_discontinuities.csv"
+    if not continuity_df.empty:
+        continuity_df.rename(columns={"gap": "pred_continuity_gap"}, inplace=True)
+        continuity_df["is_violation"] = (
+            continuity_df["pred_continuity_gap"].astype(float).abs() > continuity_threshold
+        )
+        df = df.merge(
+            continuity_df[
+                [
+                    "dataset_name",
+                    "segment_index",
+                    "pred_continuity_gap",
+                    "prev_segment_end_MR",
+                ]
+            ],
+            on=["dataset_name", "segment_index"],
+            how="left",
+        )
+        df.rename(columns={"prev_segment_end_MR": "prev_pred_end_MR"}, inplace=True)
+        continuity_df.to_csv(diagnostics_path, index=False, float_format="%.9g")
         logger.info(
             "Recorded %s continuity checks to %s", len(continuity_df), diagnostics_path
-        )  # CHANGE: Log diagnostics
-    else:  # CHANGE: No continuity records
-        diagnostics_path = diagnostics_dir / "phase2C_discontinuities.csv"  # CHANGE: Diagnostics path fallback
-        pd.DataFrame(columns=["dataset_name", "segment_index", "continuity_gap", "is_violation"]).to_csv(
-            diagnostics_path, index=False
-        )  # CHANGE: Write empty diagnostics
-        logger.info("No continuity gaps detected; wrote empty diagnostics to %s", diagnostics_path)  # CHANGE: Log empty
+        )
+    else:
+        pd.DataFrame(
+            columns=["dataset_name", "segment_index", "pred_continuity_gap", "is_violation"]
+        ).to_csv(diagnostics_path, index=False)
+        logger.info("No continuity gaps detected; wrote empty diagnostics to %s", diagnostics_path)
+        df["pred_continuity_gap"] = np.nan
+        df["prev_pred_end_MR"] = np.nan
 
-    df.to_csv(output_path, index=False, float_format="%.9g")  # CHANGE: Write predictions CSV
-    logger.info("Wrote predictions for %s segments to %s", len(df), output_path)  # CHANGE: Log output
+    df.to_csv(output_path, index=False, float_format="%.9g")
+    logger.info("Wrote predictions for %s segments to %s", len(df), output_path)
 
 
-if __name__ == "__main__":  # CHANGE: Script guard
-    main()  # CHANGE: Invoke main
+if __name__ == "__main__":
+    main()
