@@ -313,7 +313,7 @@ def midilli_derivative(time: np.ndarray, k: float, n: float, b: float) -> np.nda
 
 
 PAGE_BOUNDS = (np.array([1e-8, 0.1]), np.array([10.0, 3.0]))
-MIDILLI_BOUNDS = (np.array([1e-8, 0.1, -5e-3]), np.array([10.0, 3.0, 5e-3]))
+MIDILLI_BOUNDS = (np.array([1e-8, 0.1, -5e-3]), np.array([10.0, 3.0, 0]))
 MIDILLI_SOFT_BOUND = 1e-3
 SCHEMA_VERSION = "2.0.0"
 
@@ -1375,7 +1375,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
     parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
-    parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
+    parser.add_argument("--max-splits", type=int, default=1, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
     parser.add_argument("--min-points-leaf", type=int, default=8, help="Minimum points required for child segments.")
@@ -1390,10 +1390,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Evaluate Page vs Midilli per segment and choose the lower AICc.",
     )
-    parser.add_argument("--join-penalty", type=float, default=10.0, help="Penalty on squared join gaps.")
-    parser.add_argument("--slope-penalty", type=float, default=2.0, help="Penalty on squared slope gaps.")
+    parser.add_argument("--join-penalty", type=float, default=100.0, help="Penalty on squared join gaps.")
+    parser.add_argument("--slope-penalty", type=float, default=6.0, help="Penalty on squared slope gaps.")
     parser.add_argument("--shape-penalty-mono", type=float, default=50.0, help="Penalty per monotonicity violation.")
-    parser.add_argument("--max-allowed-gap", type=float, default=0.02, help="Maximum allowed join gap.")
+    parser.add_argument("--max-allowed-gap", type=float, default=0.008, help="Maximum allowed join gap.")
     parser.add_argument(
         "--max-allowed-slope-gap", type=float, default=5e-4, help="Maximum allowed slope discontinuity."
     )
@@ -1403,7 +1403,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=True,
         help="Reject splits that produce monotonicity violations.",
     )
-    parser.add_argument("--total-gap-budget", type=float, default=0.05, help="Total allowed sum of join gaps.")
+    parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
     parser.add_argument("--time-penalty", type=float, default=0.5, help="Penalty weight for split location prior.")
     parser.add_argument("--lowess-frac-root", type=float, default=0.20, help="LOWESS fraction at the root node.")
     parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
