@@ -1159,7 +1159,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         conflict_handler="resolve",
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
-    parser.add_argument("--outdir", default="outputs", help="Directory to store outputs.")
+    parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
     parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
