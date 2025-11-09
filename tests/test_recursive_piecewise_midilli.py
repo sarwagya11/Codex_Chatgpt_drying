@@ -50,6 +50,8 @@ def make_config(**overrides) -> Config:
         seed=1337,
         log_level="INFO",
         probe_better_child=overrides.get("probe_better_child", True),
+        lambda_b=overrides.get("lambda_b", 50.0),
+        page_fallback_eps=overrides.get("page_fallback_eps", 2.0),
     )
     params.update(overrides)
     return Config(**params)
@@ -84,9 +86,9 @@ def test_single_split_recovery(base_time: np.ndarray):
     root, budget, _ = build_tree(base_time, values, cfg)
     assert root.split is not None
     assert abs(root.split.split_index - split_idx_true) <= 3
-    assert root.split.gap <= cfg.max_allowed_gap + 1e-6
+    assert root.split.raw_gap <= cfg.max_allowed_gap + 1e-6
     assert root.split.rel_improvement >= cfg.min_rel_improvement - 1e-6
-    assert math.isclose(budget.sum_gaps, root.split.gap, rel_tol=1e-6, abs_tol=1e-6)
+    assert math.isclose(budget.sum_gaps, root.split.raw_gap, rel_tol=1e-6, abs_tol=1e-6)
 
 
 def test_no_split_for_page_curve(base_time: np.ndarray):

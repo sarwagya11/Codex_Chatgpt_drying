@@ -60,6 +60,8 @@ class Config:
     seed: int
     log_level: str
     probe_better_child: bool
+    lambda_b: float
+    page_fallback_eps: float
     max_allowed_gap_eps: float = 1e-12
     max_allowed_slope_eps: float = 1e-12
     monotonic_eps: float = 5e-6
@@ -77,6 +79,7 @@ class FitStats:
     n_obs: int
     saturates_bound: bool
     predictions: np.ndarray
+    hit_bounds: Dict[str, bool]
 
     def to_summary(self) -> Dict[str, object]:
         return {
@@ -84,6 +87,8 @@ class FitStats:
             "params": {key: float(value) for key, value in self.params.items()},
             "AICc": float(self.aicc),
             "RMSE": float(self.rmse),
+            "n_obs": int(self.n_obs),
+            "hit_bounds": {key: bool(value) for key, value in self.hit_bounds.items()},
         }
 
 
@@ -91,16 +96,23 @@ class FitStats:
 class SplitInfo:
     split_index: int
     split_time: float
-    gap: float
+    raw_gap: float
+    level_gap: float
     slope_gap: float
     penalized_score: float
     time_penalty: float
+    level_shift_applied: float
     score_components: Dict[str, float]
     left: FitStats
     right: FitStats
     delta_aicc: float
     rel_improvement: float
     violations: int
+    accept_reason: str
+    left_reason: str
+    right_reason: str
+    b_penalty_left: float
+    b_penalty_right: float
 
 
 @dataclass
@@ -122,6 +134,8 @@ class SegmentNode:
     split: Optional[SplitInfo] = None
     children: List["SegmentNode"] = field(default_factory=list)
     evidence: Optional[Evidence] = None
+    offset: float = 0.0
+    diagnostics: Dict[str, float] = field(default_factory=dict)
 
     def is_leaf(self) -> bool:
         return not self.children
@@ -132,24 +146,42 @@ class SegmentNode:
             "start_idx": self.start,
             "end_idx": self.end,
             "depth": self.depth,
-            "unsplit": self.fit.to_summary(),
+            "family": self.fit.family,
+            "params": {key: float(value) for key, value in self.fit.params.items()},
+            "n_obs": int(self.fit.n_obs),
+            "hit_bounds": {key: bool(val) for key, val in self.fit.hit_bounds.items()},
+            "rmse_seg": float(self.fit.rmse),
+            "lowess_amp": float(self.diagnostics.get("lowess_amp", 0.0)),
+            "lowess_curv": float(self.diagnostics.get("lowess_curv", 0.0)),
+            "left_slope": float(self.diagnostics.get("left_slope", 0.0)),
+            "right_slope": float(self.diagnostics.get("right_slope", 0.0)),
+            "offset": float(self.offset),
         }
         if self.split is not None:
             payload.update(
                 {
                     "t_split": float(self.split.split_time),
-                    "gap": float(self.split.gap),
+                    "level_gap": float(self.split.level_gap),
+                    "raw_gap": float(self.split.raw_gap),
                     "slope_gap": float(self.split.slope_gap),
                     "penalized_score": float(self.split.penalized_score),
                     "time_penalty": float(self.split.time_penalty),
                     "delta_aicc": float(self.split.delta_aicc),
                     "rel_improvement": float(self.split.rel_improvement),
-                    "violations": int(self.split.violations),
+                    "mono_violations": int(self.split.violations),
+                    "level_shift_applied": float(self.split.level_shift_applied),
+                    "accept_reason": self.split.accept_reason,
                     "score_components": {
                         key: float(value) for key, value in self.split.score_components.items()
                     },
-                    "left": self.split.left.to_summary(),
-                    "right": self.split.right.to_summary(),
+                    "left": {
+                        **self.split.left.to_summary(),
+                        "selection_reason": self.split.left_reason,
+                    },
+                    "right": {
+                        **self.split.right.to_summary(),
+                        "selection_reason": self.split.right_reason,
+                    },
                     "children": [child.node_id for child in self.children],
                 }
             )
@@ -176,20 +208,29 @@ class CandidateRecord:
     params_left: Dict[str, float]
     aicc_left: float
     rmse_left: float
+    hit_bounds_left: Dict[str, bool]
+    model_left_reason: str
     model_right: str
     params_right: Dict[str, float]
     aicc_right: float
     rmse_right: float
+    hit_bounds_right: Dict[str, bool]
+    model_right_reason: str
     aicc_unsplit: float
     delta_aicc: float
     rel_improvement: float
     gap: float
+    level_gap: float
     slope_gap: float
     violations: int
     time_pen: float
+    level_shift_applied: float
+    b_pen_left: float
+    b_pen_right: float
     penalized_score: float
     rejected_flag: bool
     reject_reason: str
+    accept_reason: str
     tests_fired: List[str]
 
     def to_csv_row(self) -> Dict[str, object]:
@@ -204,20 +245,29 @@ class CandidateRecord:
             "params_left_json": json.dumps(self.params_left, sort_keys=True),
             "AICc_left": self.aicc_left,
             "RMSE_left": self.rmse_left,
+            "hit_bounds_left_json": json.dumps(self.hit_bounds_left, sort_keys=True),
+            "model_left_reason": self.model_left_reason,
             "model_right": self.model_right,
             "params_right_json": json.dumps(self.params_right, sort_keys=True),
             "AICc_right": self.aicc_right,
             "RMSE_right": self.rmse_right,
+            "hit_bounds_right_json": json.dumps(self.hit_bounds_right, sort_keys=True),
+            "model_right_reason": self.model_right_reason,
             "AICc_unsplit": self.aicc_unsplit,
             "delta_AICc": self.delta_aicc,
             "rel_impr": self.rel_improvement,
             "gap": self.gap,
+            "level_gap": self.level_gap,
             "slope_gap": self.slope_gap,
             "violations": self.violations,
             "time_pen": self.time_pen,
+            "level_shift_applied": self.level_shift_applied,
+            "b_pen_left": self.b_pen_left,
+            "b_pen_right": self.b_pen_right,
             "penalized_score": self.penalized_score,
             "rejected_flag": self.rejected_flag,
             "reject_reason": self.reject_reason,
+            "accept_reason": self.accept_reason,
             "tests_fired_json": json.dumps(self.tests_fired, sort_keys=True),
         }
 
@@ -232,6 +282,8 @@ class FitCache:
     def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
         self._cache[(family, start, end)] = stats
 
+    def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
+        self._cache[(family, start, end)] = stats
 
 @dataclass
 class BudgetState:
@@ -263,6 +315,7 @@ def midilli_derivative(time: np.ndarray, k: float, n: float, b: float) -> np.nda
 PAGE_BOUNDS = (np.array([1e-8, 0.1]), np.array([10.0, 3.0]))
 MIDILLI_BOUNDS = (np.array([1e-8, 0.1, -5e-3]), np.array([10.0, 3.0, 5e-3]))
 MIDILLI_SOFT_BOUND = 1e-3
+SCHEMA_VERSION = "2.0.0"
 
 
 def _initial_guess_page(time: np.ndarray, values: np.ndarray) -> Tuple[float, float]:
@@ -316,26 +369,38 @@ def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[F
         )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
-    predictions = page_model(time, params[0], params[1])
+    params = np.clip(params, PAGE_BOUNDS[0], PAGE_BOUNDS[1])
+    k = float(params[0])
+    n = float(params[1])
+    predictions = page_model(time, k, n)
     residuals = values - predictions
     rss = float(np.dot(residuals, residuals))
     rmse = math.sqrt(max(rss, 0.0) / time.size)
     aicc = _compute_aicc(time.size, rss, 2)
+    hit_bounds = {
+        "k": bool(
+            abs(k - PAGE_BOUNDS[0][0]) <= 1e-8 or abs(k - PAGE_BOUNDS[1][0]) <= 1e-8
+        ),
+        "n": bool(
+            abs(n - PAGE_BOUNDS[0][1]) <= 1e-8 or abs(n - PAGE_BOUNDS[1][1]) <= 1e-8
+        ),
+        "b": False,
+    }
     return FitStats(
         family="Page",
-        params={"k": float(params[0]), "n": float(params[1])},
+        params={"k": k, "n": n, "b": 0.0},
         rss=rss,
         rmse=rmse,
         aicc=aicc,
         n_obs=time.size,
-        saturates_bound=False,
+        saturates_bound=any(hit_bounds.values()),
         predictions=predictions,
+        hit_bounds=hit_bounds,
     )
 
 
 def _fit_midilli(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[FitStats]:
     guess = _initial_guess_midilli(time, values)
-    penalty_scale = math.sqrt(time.size)
 
     try:
         params, _ = curve_fit(
@@ -348,28 +413,37 @@ def _fit_midilli(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optiona
         )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
-
-    predictions = midilli_model(time, params[0], params[1], params[2])
+    params = np.clip(params, MIDILLI_BOUNDS[0], MIDILLI_BOUNDS[1])
+    k = float(params[0])
+    n = float(params[1])
+    b = float(params[2])
+    predictions = midilli_model(time, k, n, b)
     residuals = values - predictions
     rss = float(np.dot(residuals, residuals))
-    soft_excess = max(abs(params[2]) - MIDILLI_SOFT_BOUND, 0.0)
-    if soft_excess > 0:
-        rss += penalty_scale * (soft_excess**2)
     rmse = math.sqrt(max(rss, 0.0) / time.size)
     aicc = _compute_aicc(time.size, rss, 3)
-    saturates = bool(
-        abs(params[2] - MIDILLI_BOUNDS[0][2]) <= 1e-6
-        or abs(params[2] - MIDILLI_BOUNDS[1][2]) <= 1e-6
-    )
+    hit_bounds = {
+        "k": bool(
+            abs(k - MIDILLI_BOUNDS[0][0]) <= 1e-8 or abs(k - MIDILLI_BOUNDS[1][0]) <= 1e-8
+        ),
+        "n": bool(
+            abs(n - MIDILLI_BOUNDS[0][1]) <= 1e-8 or abs(n - MIDILLI_BOUNDS[1][1]) <= 1e-8
+        ),
+        "b": bool(
+            abs(b - MIDILLI_BOUNDS[0][2]) <= 1e-8 or abs(b - MIDILLI_BOUNDS[1][2]) <= 1e-8
+        ),
+    }
+    saturates = any(hit_bounds.values())
     return FitStats(
         family="Midilli",
-        params={"k": float(params[0]), "n": float(params[1]), "b": float(params[2])},
+        params={"k": k, "n": n, "b": b},
         rss=rss,
         rmse=rmse,
         aicc=aicc,
         n_obs=time.size,
         saturates_bound=saturates,
         predictions=predictions,
+        hit_bounds=hit_bounds,
     )
 
 
@@ -404,23 +478,31 @@ def select_best_model(
     values: np.ndarray,
     cache: FitCache,
     cfg: Config,
-) -> Optional[FitStats]:
-    candidates: List[FitStats] = []
+) -> Optional[Tuple[FitStats, str]]:
     midilli = fit_segment("Midilli", start, end, time, values, cache, cfg.max_iter)
+    fallback_trigger = False
     if midilli is not None:
-        candidates.append(midilli)
-        if midilli.saturates_bound:
-            page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
-            if page is not None:
-                candidates.append(page)
-    if cfg.allow_per_segment_model:
+        fallback_trigger = midilli.saturates_bound or midilli.hit_bounds.get("b", False)
+    need_page = cfg.allow_per_segment_model or fallback_trigger
+    page: Optional[FitStats] = None
+    if need_page:
         page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
-        if page is not None and all(stat.family != "Page" for stat in candidates):
-            candidates.append(page)
-    if not candidates:
+
+    if midilli is None and page is None:
         return None
-    best = min(candidates, key=lambda item: item.aicc)
-    return best
+    if midilli is None and page is not None:
+        return page, "page_only"
+    if page is None and midilli is not None:
+        return midilli, "midilli_only"
+    assert midilli is not None and page is not None
+
+    if fallback_trigger and page.aicc <= midilli.aicc + cfg.page_fallback_eps:
+        return page, "page_fallback"
+
+    if cfg.allow_per_segment_model and page.aicc < midilli.aicc - 1e-9:
+        return page, "page"
+
+    return midilli, "midilli"
 
 
 def select_model_with_fallback(
@@ -430,11 +512,14 @@ def select_model_with_fallback(
     values: np.ndarray,
     cache: FitCache,
     cfg: Config,
-) -> Optional[FitStats]:
-    stats = select_best_model(start, end, time, values, cache, cfg)
-    if stats is not None:
-        return stats
-    return fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
+) -> Optional[Tuple[FitStats, str]]:
+    result = select_best_model(start, end, time, values, cache, cfg)
+    if result is not None:
+        return result
+    fallback = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
+    if fallback is None:
+        return None
+    return fallback, "page_fallback_only"
 
 
 def compute_unsplit_fit(
@@ -445,7 +530,10 @@ def compute_unsplit_fit(
     cache: FitCache,
     cfg: Config,
 ) -> Optional[FitStats]:
-    return select_model_with_fallback(start, end, time, values, cache, cfg)
+    result = select_model_with_fallback(start, end, time, values, cache, cfg)
+    if result is None:
+        return None
+    return result[0]
 
 
 def _find_lowess_extrema(residuals: np.ndarray, smooth: np.ndarray) -> List[int]:
@@ -476,7 +564,11 @@ def generate_candidates(
     grid = np.linspace(allowed_min, allowed_max, cfg.candidate_grid_count)
     grid_indices = {int(round(idx)) for idx in grid}
     grid_indices = {idx for idx in grid_indices if allowed_min <= idx <= allowed_max}
-    residuals = values[start:end] - node.fit.predictions
+    segment_time = time[start:end]
+    base_pred = _segment_base_predictions(node.fit, segment_time)
+    if base_pred.size:
+        base_pred = base_pred + node.offset
+    residuals = values[start:end] - base_pred
     if node.depth == 0:
         fractions = [cfg.lowess_frac_root]
     else:
@@ -528,6 +620,14 @@ def _model_value_and_slope(fit: FitStats, time_value: float) -> Tuple[float, flo
     return value, slope
 
 
+def _segment_base_predictions(fit: FitStats, segment_time: np.ndarray) -> np.ndarray:
+    if fit.family == "Page":
+        return page_model(segment_time, fit.params["k"], fit.params["n"])
+    return midilli_model(
+        segment_time, fit.params["k"], fit.params["n"], fit.params.get("b", 0.0)
+    )
+
+
 def _combine_predictions(
     left: FitStats,
     right: FitStats,
@@ -535,21 +635,14 @@ def _combine_predictions(
     split_idx: int,
     end: int,
     time: np.ndarray,
+    level_shift: float = 0.0,
 ) -> np.ndarray:
     left_time = time[start : split_idx + 1]
     right_time = time[split_idx + 1 : end]
-    if left.family == "Page":
-        left_pred = page_model(left_time, left.params["k"], left.params["n"])
-    else:
-        left_pred = midilli_model(
-            left_time, left.params["k"], left.params["n"], left.params.get("b", 0.0)
-        )
-    if right.family == "Page":
-        right_pred = page_model(right_time, right.params["k"], right.params["n"])
-    else:
-        right_pred = midilli_model(
-            right_time, right.params["k"], right.params["n"], right.params.get("b", 0.0)
-        )
+    left_pred = _segment_base_predictions(left, left_time)
+    right_pred = _segment_base_predictions(right, right_time)
+    if right_pred.size:
+        right_pred = right_pred + level_shift
     return np.concatenate([left_pred, right_pred])
 
 
@@ -571,6 +664,15 @@ def _time_penalty(split_time: float, node: SegmentNode, time: np.ndarray, cfg: C
     return cfg.time_penalty * (x**2)
 
 
+def _b_penalty(fit: FitStats, cfg: Config) -> float:
+    if fit.family != "Midilli" or cfg.lambda_b <= 0:
+        return 0.0
+    excess = max(abs(fit.params.get("b", 0.0)) - MIDILLI_SOFT_BOUND, 0.0)
+    if excess <= 0:
+        return 0.0
+    return cfg.lambda_b * (excess**2)
+
+
 def score_candidate(
     node: SegmentNode,
     split_idx: int,
@@ -583,14 +685,19 @@ def score_candidate(
 ) -> Tuple[Optional[SplitInfo], CandidateRecord]:
     start = node.start
     end = node.end
-    left_stats = select_model_with_fallback(start, split_idx + 1, time, values, cache, cfg)
-    right_stats = select_model_with_fallback(split_idx + 1, end, time, values, cache, cfg)
+    left_result = select_model_with_fallback(start, split_idx + 1, time, values, cache, cfg)
+    right_result = select_model_with_fallback(split_idx + 1, end, time, values, cache, cfg)
+    left_stats = left_result[0] if left_result is not None else None
+    right_stats = right_result[0] if right_result is not None else None
+    left_reason = left_result[1] if left_result is not None else ""
+    right_reason = right_result[1] if right_result is not None else ""
     left_n = split_idx - start + 1
     right_n = end - (split_idx + 1)
     split_time = float(time[split_idx])
     tests: List[str] = []
     rejected = False
     reason = ""
+    accept_reason = ""
 
     if left_stats is None or right_stats is None:
         rejected = True
@@ -607,23 +714,37 @@ def score_candidate(
             left_stats.params if left_stats else {},
             left_stats.aicc if left_stats else float("nan"),
             left_stats.rmse if left_stats else float("nan"),
+            left_stats.hit_bounds if left_stats else {},
+            left_reason,
             right_stats.family if right_stats else "",
             right_stats.params if right_stats else {},
             right_stats.aicc if right_stats else float("nan"),
             right_stats.rmse if right_stats else float("nan"),
+            right_stats.hit_bounds if right_stats else {},
+            right_reason,
             node.fit.aicc,
+            float("nan"),
             float("nan"),
             float("nan"),
             float("nan"),
             float("nan"),
             0,
             0.0,
+            0.0,
+            0.0,
+            0.0,
             float("nan"),
             rejected,
             reason,
+            accept_reason,
             tests,
         )
         return None, record
+
+    if left_reason.startswith("page_fallback"):
+        tests.append("page_fallback_left")
+    if right_reason.startswith("page_fallback"):
+        tests.append("page_fallback_right")
 
     base = left_stats.aicc + right_stats.aicc
     delta_aicc = node.fit.aicc - base
@@ -633,17 +754,21 @@ def score_candidate(
     value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     right_time = float(time[split_idx + 1])
     value_right, slope_right = _model_value_and_slope(right_stats, right_time)
-    gap = abs(value_left - value_right)
+    raw_gap = abs(value_left - value_right)
+    level_shift = value_left - value_right
+    level_gap = abs(value_left - (value_right + level_shift))
     slope_gap = abs(slope_left - slope_right)
     time_pen = _time_penalty(split_time, node, time, cfg)
-    combined_preds = _combine_predictions(left_stats, right_stats, start, split_idx, end, time)
+    combined_preds = _combine_predictions(
+        left_stats, right_stats, start, split_idx, end, time, level_shift
+    )
     violations = _count_monotonic_violations(combined_preds, cfg.monotonic_eps)
 
-    if not math.isfinite(base) or not math.isfinite(gap) or not math.isfinite(slope_gap):
+    if not math.isfinite(base) or not math.isfinite(raw_gap) or not math.isfinite(slope_gap):
         rejected = True
         reason = "nan_metric"
         tests.append("nan_metric")
-    if gap > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
+    if raw_gap > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_limit"
         tests.append("gap_limit")
@@ -659,13 +784,16 @@ def score_candidate(
         rejected = True
         reason = "rel_improvement"
         tests.append("rel_improvement")
-    if budget_sum_gaps + gap > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
+    if budget_sum_gaps + raw_gap > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_budget"
         tests.append("gap_budget")
 
-    score = base + cfg.join_penalty * (gap**2) + cfg.slope_penalty * (slope_gap**2)
-    score += cfg.shape_penalty_mono * violations + time_pen
+    b_pen_left = _b_penalty(left_stats, cfg)
+    b_pen_right = _b_penalty(right_stats, cfg)
+
+    score = base + cfg.join_penalty * (raw_gap**2) + cfg.slope_penalty * (slope_gap**2)
+    score += cfg.shape_penalty_mono * violations + time_pen + b_pen_left + b_pen_right
 
     if not rejected and not math.isfinite(score):
         rejected = True
@@ -675,25 +803,36 @@ def score_candidate(
     split_info = None
     if not rejected:
         tests.append("accepted")
+        accept_reason = "best_penalized_score"
         split_info = SplitInfo(
             split_idx,
             split_time,
-            gap,
+            raw_gap,
+            level_gap,
             slope_gap,
             score,
             time_pen,
+            level_shift,
             {
                 "base": base,
-                "gap_pen": cfg.join_penalty * (gap**2),
+                "gap_pen": cfg.join_penalty * (raw_gap**2),
                 "slope_pen": cfg.slope_penalty * (slope_gap**2),
                 "time_pen": time_pen,
                 "mono_pen": cfg.shape_penalty_mono * violations,
+                "b_pen_left": b_pen_left,
+                "b_pen_right": b_pen_right,
+                "raw_gap": raw_gap,
             },
             left_stats,
             right_stats,
             delta_aicc,
             rel_impr,
             violations,
+            accept_reason,
+            left_reason,
+            right_reason,
+            b_pen_left,
+            b_pen_right,
         )
     else:
         if not tests:
@@ -710,20 +849,29 @@ def score_candidate(
         left_stats.params,
         left_stats.aicc,
         left_stats.rmse,
+        left_stats.hit_bounds,
+        left_reason,
         right_stats.family,
         right_stats.params,
         right_stats.aicc,
         right_stats.rmse,
+        right_stats.hit_bounds,
+        right_reason,
         node.fit.aicc,
         delta_aicc,
         rel_impr,
-        gap,
+        raw_gap,
+        level_gap,
         slope_gap,
         violations,
         time_pen,
+        level_shift,
+        b_pen_left,
+        b_pen_right,
         score,
         rejected,
         reason,
+        accept_reason,
         tests,
     )
     return split_info, record
@@ -750,10 +898,22 @@ def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
 
 
 def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
-    if residuals.size == 0:
+    if residuals.size < 2:
         return 0.0
     smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
     return float(np.nanmax(smoothed) - np.nanmin(smoothed))
+
+
+def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
+    if residuals.size < 3:
+        return 0.0
+    smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
+    if smoothed.size < 3:
+        return 0.0
+    second_diff = np.diff(smoothed, n=2)
+    if second_diff.size == 0:
+        return 0.0
+    return float(np.nanmax(np.abs(second_diff)))
 
 
 def _slope_sign_changes(residuals: np.ndarray) -> int:
@@ -767,26 +927,23 @@ def _slope_sign_changes(residuals: np.ndarray) -> int:
 
 def compute_child_evidence(
     child: SegmentNode,
-    parent_fit: FitStats,
+    parent: SegmentNode,
     time: np.ndarray,
     values: np.ndarray,
     cfg: Config,
 ) -> Evidence:
     child_slice = slice(child.start, child.end)
     child_time = time[child_slice]
-    if parent_fit.family == "Page":
-        parent_segment_pred = page_model(child_time, parent_fit.params["k"], parent_fit.params["n"])
-        parent_k = 2
-    else:
-        parent_segment_pred = midilli_model(
-            child_time,
-            parent_fit.params["k"],
-            parent_fit.params["n"],
-            parent_fit.params.get("b", 0.0),
-        )
-        parent_k = 3
-    residuals_parent = values[child_slice] - parent_segment_pred
-    residuals_child = values[child_slice] - child.fit.predictions
+    parent_base = _segment_base_predictions(parent.fit, child_time)
+    if parent_base.size:
+        parent_base = parent_base + parent.offset
+    parent_k = 2 if parent.fit.family == "Page" else 3
+    residuals_parent = values[child_slice] - parent_base
+
+    child_base = _segment_base_predictions(child.fit, child_time)
+    if child_base.size:
+        child_base = child_base + child.offset
+    residuals_child = values[child_slice] - child_base
     rss_parent = float(np.dot(residuals_parent, residuals_parent))
     rss_child = float(np.dot(residuals_child, residuals_child))
     aicc_parent = _compute_aicc(child.fit.n_obs, rss_parent, parent_k)
@@ -797,6 +954,51 @@ def compute_child_evidence(
     runs_component = 1.0 - float(np.clip(runs_p, 0.0, 1.0)) if math.isfinite(runs_p) else 1.0
     score = float(delta - amplitude - slope_changes - runs_component)
     return Evidence(delta, runs_p, amplitude, slope_changes, score)
+
+
+def _segment_boundary_slopes(fit: FitStats, segment_time: np.ndarray) -> Tuple[float, float]:
+    if segment_time.size == 0:
+        return 0.0, 0.0
+    left_t = float(segment_time[0])
+    right_t = float(segment_time[-1])
+    if fit.family == "Page":
+        left_val = float(page_derivative(np.array([left_t]), fit.params["k"], fit.params["n"])[0])
+        right_val = float(page_derivative(np.array([right_t]), fit.params["k"], fit.params["n"])[0])
+    else:
+        left_val = float(
+            midilli_derivative(
+                np.array([left_t]),
+                fit.params["k"],
+                fit.params["n"],
+                fit.params.get("b", 0.0),
+            )[0]
+        )
+        right_val = float(
+            midilli_derivative(
+                np.array([right_t]),
+                fit.params["k"],
+                fit.params["n"],
+                fit.params.get("b", 0.0),
+            )[0]
+        )
+    return left_val, right_val
+
+
+def update_node_diagnostics(node: SegmentNode, time: np.ndarray, values: np.ndarray, cfg: Config) -> None:
+    segment_time = time[node.start : node.end]
+    base_pred = _segment_base_predictions(node.fit, segment_time)
+    if base_pred.size:
+        base_pred = base_pred + node.offset
+    residuals = values[node.start : node.end] - base_pred
+    amp = _residual_lowess_amplitude(segment_time, residuals, cfg.lowess_frac_root)
+    curv = _lowess_curvature(segment_time, residuals, cfg.lowess_frac_root)
+    left_slope, right_slope = _segment_boundary_slopes(node.fit, segment_time)
+    node.diagnostics = {
+        "lowess_amp": amp,
+        "lowess_curv": curv,
+        "left_slope": left_slope,
+        "right_slope": right_slope,
+    }
 
 
 def recurse_node(
@@ -833,6 +1035,7 @@ def recurse_node(
         end=best_info.split_index + 1,
         depth=node.depth + 1,
         fit=best_info.left,
+        offset=node.offset,
     )
     right_node = SegmentNode(
         node_id=f"{node.node_id}R",
@@ -840,13 +1043,17 @@ def recurse_node(
         end=node.end,
         depth=node.depth + 1,
         fit=best_info.right,
+        offset=node.offset + best_info.level_shift_applied,
     )
     node.children = [left_node, right_node]
-    budget.sum_gaps += best_info.gap
+    budget.sum_gaps += best_info.raw_gap
     budget.splits_used += 1
     budget.levels_splits[node.depth] = budget.levels_splits.get(node.depth, 0) + 1
-    left_node.evidence = compute_child_evidence(left_node, node.fit, time, values, cfg)
-    right_node.evidence = compute_child_evidence(right_node, node.fit, time, values, cfg)
+    left_node.evidence = compute_child_evidence(left_node, node, time, values, cfg)
+    right_node.evidence = compute_child_evidence(right_node, node, time, values, cfg)
+
+    update_node_diagnostics(left_node, time, values, cfg)
+    update_node_diagnostics(right_node, time, values, cfg)
 
     if cfg.probe_better_child:
         def _evidence_key(child: SegmentNode) -> Tuple[float, float, float]:
@@ -875,17 +1082,10 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
 
     def _assign(segment: SegmentNode) -> None:
         segment_time = time[segment.start : segment.end]
-        if segment.fit.family == "Page":
-            preds[segment.start : segment.end] = page_model(
-                segment_time, segment.fit.params["k"], segment.fit.params["n"]
-            )
-        else:
-            preds[segment.start : segment.end] = midilli_model(
-                segment_time,
-                segment.fit.params["k"],
-                segment.fit.params["n"],
-                segment.fit.params.get("b", 0.0),
-            )
+        base = _segment_base_predictions(segment.fit, segment_time)
+        if base.size:
+            base = base + segment.offset
+        preds[segment.start : segment.end] = base
         for child in segment.children:
             _assign(child)
 
@@ -919,20 +1119,29 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "params_left_json",
         "AICc_left",
         "RMSE_left",
+        "hit_bounds_left_json",
+        "model_left_reason",
         "model_right",
         "params_right_json",
         "AICc_right",
         "RMSE_right",
+        "hit_bounds_right_json",
+        "model_right_reason",
         "AICc_unsplit",
         "delta_AICc",
         "rel_impr",
         "gap",
+        "level_gap",
         "slope_gap",
         "violations",
         "time_pen",
+        "level_shift_applied",
+        "b_pen_left",
+        "b_pen_right",
         "penalized_score",
         "rejected_flag",
         "reject_reason",
+        "accept_reason",
         "tests_fired_json",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -945,7 +1154,7 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
 def collect_split_metrics(node: SegmentNode) -> List[Tuple[float, float, float]]:
     splits: List[Tuple[float, float, float]] = []
     if node.split is not None:
-        splits.append((node.split.split_time, node.split.gap, node.split.slope_gap))
+        splits.append((node.split.split_time, node.split.level_gap, node.split.slope_gap))
         for child in node.children:
             splits.extend(collect_split_metrics(child))
     return splits
@@ -1058,6 +1267,8 @@ CLI_FIELDS = [
     "max_iter",
     "seed",
     "probe_better_child",
+    "lambda_b",
+    "page_fallback_eps",
     "log_level",
 ]
 
@@ -1109,6 +1320,9 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     if time.size >= cfg.min_points_root:
         recurse_node(root, time, values, cache, cfg, path.stem, budget, candidate_records)
 
+    for node in gather_nodes(root):
+        update_node_diagnostics(node, time, values, cfg)
+
     preds, corrected, violations = reconstruct_predictions(root, time, cfg)
     leaves = [node for node in gather_nodes(root) if node.is_leaf()]
     leaf_aicc = sum(leaf.fit.aicc for leaf in leaves)
@@ -1126,6 +1340,7 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     version = _get_version()
 
     summary = {
+        "schema_version": SCHEMA_VERSION,
         "file": str(path),
         "config": config_dict,
         "config_digest": config_digest,
@@ -1199,6 +1414,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=True,
         help="Recurse into the higher-evidence child before probing the other side.",
     )
+    parser.add_argument(
+        "--lambda-b",
+        type=float,
+        default=50.0,
+        help="Penalty weight applied when |b| exceeds 1e-3 for Midilli segments.",
+    )
+    parser.add_argument(
+        "--page-fallback-eps",
+        type=float,
+        default=2.0,
+        help="AICc tolerance for preferring Page when Midilli hits parameter bounds.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
     return parser.parse_args(argv)
 
@@ -1235,6 +1462,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         seed=args.seed,
         log_level=str(args.log_level),
         probe_better_child=bool(args.probe_better_child),
+        lambda_b=args.lambda_b,
+        page_fallback_eps=args.page_fallback_eps,
     )
 
     np.random.seed(cfg.seed)
