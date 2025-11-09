@@ -1,262 +1,510 @@
-"""Assemble segment-level dataset for phase-2 modelling."""  # CHANGE: Updated script header
+"""Assemble segment-level dataset from recursive Midilli outputs."""
 
-from __future__ import annotations  # CHANGE: Future annotations retained
+from __future__ import annotations
 
-import argparse  # CHANGE: CLI parsing import
-import json  # CHANGE: Summary index parsing
-from pathlib import Path  # CHANGE: Path operations
-from typing import Any, Dict, Iterable, Iterator, Tuple  # CHANGE: Typing helpers
+import argparse
+import json
+import logging
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, Iterator, List, Tuple
 
-import pandas as pd  # CHANGE: DataFrame handling
+import numpy as np
+import pandas as pd
 
-import sys  # CHANGE: Ensure project importability
+try:
+    from statsmodels.nonparametric.smoothers_lowess import lowess  # type: ignore
+    HAVE_LOWESS = True
+except ImportError:  # pragma: no cover - optional dependency
+    HAVE_LOWESS = False
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]  # CHANGE: Project root
-_SRC_ROOT = _PROJECT_ROOT / "src"  # CHANGE: Source directory
-for candidate in (_PROJECT_ROOT, _SRC_ROOT):  # CHANGE: Extend sys.path loop
-    candidate_str = str(candidate)  # CHANGE: Convert to string
-    if candidate_str not in sys.path:  # CHANGE: Avoid duplicates
-        sys.path.insert(0, candidate_str)  # CHANGE: Insert path
+import sys
 
-from kinetics import load_and_preprocess  # noqa: E402  # CHANGE: Preprocessing import
-from kinetics.metrics import (  # noqa: E402  # CHANGE: Metrics utilities
-    check_time_monotonicity,  # CHANGE: Time monotonicity check
-    segment_discontinuities,  # CHANGE: Continuity diagnostics
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SRC_ROOT = _PROJECT_ROOT / "src"
+for candidate in (_PROJECT_ROOT, _SRC_ROOT):
+    candidate_str = str(candidate)
+    if candidate_str not in sys.path:
+        sys.path.insert(0, candidate_str)
+
+from kinetics import load_and_preprocess  # noqa: E402
+from kinetics.phase2_utils import (  # noqa: E402
+    BASE_FEATURE_COLUMNS,
+    clip_mr,
+    configure_logging,
+    ensure_directory,
+    extract_config_section,
+    load_config,
+    midilli_curve,
+    midilli_derivative,
+    prepare_feature_frame,
+    resolve_dataset_path,
 )
-from kinetics.phase2_utils import (  # noqa: E402  # CHANGE: Shared utilities import
-    configure_logging,  # CHANGE: Logger factory
-    ensure_directory,  # CHANGE: Directory helper
-    extract_config_section,  # CHANGE: Config section helper
-    load_config,  # CHANGE: Config loader
-    resolve_dataset_path,  # CHANGE: Dataset resolver
-)
 
-DEFAULT_OUTPUT_PATH = _PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv"  # CHANGE: Default dataset path
-DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"  # CHANGE: Diagnostics directory
-DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"  # CHANGE: Log directory
-DEFAULT_LOGGER_NAME = "phase2.phase2A"  # CHANGE: Logger name constant
+DEFAULT_RUNS_ROOT = _PROJECT_ROOT / "outputs" / "recursive_midilli"
+DEFAULT_SUMMARY_INDEX = DEFAULT_RUNS_ROOT / "summary_index.json"
+DEFAULT_OUTPUT_PATH = _PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv"
+DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"
+DEFAULT_LOG_DIR = _PROJECT_ROOT / "outputs" / "logs"
+DEFAULT_LOGGER_NAME = "phase2.phase2A"
+
+REQUIRED_COLUMNS = {
+    "dataset_name",
+    "segment_index",
+    "segment_start_time",
+    "segment_end_time",
+    "segment_duration",
+    "segment_start_MR",
+    "segment_end_MR",
+    "segment_position",
+    "segment_mid_time",
+    "T",
+    "RH",
+    "velocity",
+    "thickness",
+}
 
 
-def parse_args() -> argparse.Namespace:  # CHANGE: CLI parser definition
-    parser = argparse.ArgumentParser(  # CHANGE: Parser creation
-        description="Flatten recursive Midilli segments into a modelling dataset.",  # CHANGE: Description update
+@dataclass
+class EnvironmentFeatures:
+    T: float
+    RH: float
+    velocity: float
+    thickness: float
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Flatten recursive Midilli segments into a modelling dataset.",
     )
-    parser.add_argument(  # CHANGE: Summary index argument
+    parser.add_argument(
+        "--runs-root",
+        type=Path,
+        default=DEFAULT_RUNS_ROOT,
+        help="Root directory containing per-run recursive Midilli folders.",
+    )
+    parser.add_argument(
         "--summary-index",
         type=Path,
-        default=_PROJECT_ROOT / "outputs" / "recursive_split" / "summary_index.json",
-        help="Path to the summary_index.json produced by Phase 1.",
+        default=DEFAULT_SUMMARY_INDEX,
+        help="summary_index.json produced alongside recursive Midilli outputs.",
     )
-    parser.add_argument(  # CHANGE: Data root argument
+    parser.add_argument(
         "--data-root",
         type=Path,
         default=_PROJECT_ROOT / "data",
         help="Directory containing the raw drying datasets.",
     )
-    parser.add_argument(  # CHANGE: Output dataset argument
+    parser.add_argument(
         "--output-path",
         type=Path,
         default=DEFAULT_OUTPUT_PATH,
         help="Destination CSV for the assembled segment dataset.",
     )
-    parser.add_argument(  # CHANGE: Diagnostics directory argument
+    parser.add_argument(
         "--diagnostics-dir",
         type=Path,
         default=DEFAULT_DIAGNOSTICS_DIR,
         help="Directory for diagnostics CSV outputs.",
     )
-    parser.add_argument(  # CHANGE: Continuity threshold argument
-        "--continuity-threshold",
-        type=float,
-        default=0.02,
-        help="Normalized gap threshold for continuity warnings.",
-    )
-    parser.add_argument(  # CHANGE: Config path argument
-        "--config",
-        type=Path,
-        default=None,
-        help="Optional JSON/YAML config file providing overrides.",
-    )
-    parser.add_argument(  # CHANGE: Log level argument
-        "--log-level",
-        type=str,
-        default="INFO",
-        help="Logging level (e.g., INFO, DEBUG).",
-    )
-    parser.add_argument(  # CHANGE: Log directory argument
+    parser.add_argument(
         "--log-dir",
         type=Path,
         default=DEFAULT_LOG_DIR,
         help="Directory for log files.",
     )
-    return parser.parse_args()  # CHANGE: Return parsed args
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        help="Logging level (e.g., INFO, DEBUG).",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional JSON/YAML config file providing overrides.",
+    )
+    return parser.parse_args()
 
 
-def iter_leaf_segments(tree: Dict[str, Any]) -> Iterator[Tuple[Dict[str, Any], int, str]]:  # CHANGE: Leaf iterator retained
-    stack: list[Tuple[Dict[str, Any], int, str]] = [(tree, 0, "0")]  # CHANGE: DFS stack initialization
-    while stack:  # CHANGE: Iterate stack
-        node, depth, path = stack.pop()  # CHANGE: Pop node
-        children = node.get("children") if isinstance(node, dict) else None  # CHANGE: Access children
-        if not children:  # CHANGE: Leaf detection
-            yield node, depth, path  # CHANGE: Yield leaf info
-            continue  # CHANGE: Continue traversal
-        if isinstance(children, Iterable):  # CHANGE: Iterable guard
-            for idx, child in enumerate(children):  # CHANGE: Enumerate children
-                if isinstance(child, dict):  # CHANGE: Dict guard
-                    stack.append((child, depth + 1, f"{path}.{idx}"))  # CHANGE: Push child
+def iter_tree_summaries(root: Path) -> Iterator[Path]:
+    for path in sorted(root.rglob("tree_summary.json")):
+        if path.is_file():
+            yield path
 
 
-def main() -> None:  # CHANGE: Main entrypoint
-    args = parse_args()  # CHANGE: Parse CLI args
-    config = load_config(args.config)  # CHANGE: Load optional config
-    section = extract_config_section(config, "phase2A")  # CHANGE: Phase 2A config section
+def parse_numeric_token(token: str) -> float | None:
+    cleaned = (
+        token.replace("mm", "")
+        .replace("MM", "")
+        .replace("pct", "")
+        .replace("ms", "")
+        .replace("%", "")
+    )
+    cleaned = cleaned.replace("p", ".")
+    cleaned = cleaned.strip().lower()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
-    summary_path = Path(section.get("summary_index", args.summary_index))  # CHANGE: Summary path resolution
-    data_root = Path(section.get("data_root", args.data_root))  # CHANGE: Data root resolution
-    output_path = Path(section.get("output_path", args.output_path))  # CHANGE: Output path resolution
-    diagnostics_dir = Path(section.get("diagnostics_dir", args.diagnostics_dir))  # CHANGE: Diagnostics directory resolution
-    continuity_threshold = float(section.get("continuity_threshold", args.continuity_threshold))  # CHANGE: Threshold resolution
-    log_dir = Path(section.get("log_dir", args.log_dir))  # CHANGE: Log directory resolution
-    log_level = section.get("log_level", args.log_level)  # CHANGE: Log level resolution
 
-    ensure_directory(output_path.parent)  # CHANGE: Ensure output directory
-    ensure_directory(diagnostics_dir)  # CHANGE: Ensure diagnostics directory
-    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"  # CHANGE: Log file path
-    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)  # CHANGE: Configure logger
-    logger.info("Loading summary index from %s", summary_path)  # CHANGE: Log summary path
+def extract_from_tokens(tokens: List[str], keywords: Iterable[str], prefixes: Iterable[str]) -> float | None:
+    lowered = [t.lower() for t in tokens]
+    for idx, token in enumerate(lowered):
+        if token in keywords and idx + 1 < len(tokens):
+            value = parse_numeric_token(tokens[idx + 1])
+            if value is not None:
+                return value
+    for original, token in zip(tokens, lowered):
+        for prefix in prefixes:
+            if token.startswith(prefix) and len(token) > len(prefix):
+                remainder = original[len(prefix) :]
+                value = parse_numeric_token(remainder)
+                if value is not None:
+                    return value
+    return None
 
-    summary = json.loads(summary_path.read_text())  # CHANGE: Read summary JSON
-    default_head_trim = float(summary.get("head_trim_min", 0.0))  # CHANGE: Default head trim
 
-    records: list[dict[str, Any]] = []  # CHANGE: Segment records container
-    diagnostics_records: list[dict[str, Any]] = []  # CHANGE: Diagnostics container
+def extract_environment_features(dataset_name: str, hints: Dict[str, Any]) -> EnvironmentFeatures:
+    tokens = [t for t in dataset_name.replace("-", "_").split("_") if t]
 
-    for dataset_index, dataset_entry in enumerate(summary.get("datasets", [])):  # CHANGE: Iterate datasets
-        raw_input = dataset_entry.get("input")  # CHANGE: Dataset input path
-        if raw_input is None:  # CHANGE: Skip missing entries
-            logger.debug("Skipping dataset without input reference at index %s", dataset_index)  # CHANGE: Debug skip
-            continue  # CHANGE: Continue loop
+    def _hint_or_parse(keys: Iterable[str], prefixes: Iterable[str], hint_key: str) -> float:
+        hint_val = None
+        for key in (hint_key, hint_key.lower()):
+            if key in hints and hints[key] is not None:
+                hint_val = hints[key]
+                break
+        if hint_val is not None and isinstance(hint_val, (int, float)):
+            return float(hint_val)
+        parsed = extract_from_tokens(tokens, list(keys), list(prefixes))
+        if parsed is None:
+            raise ValueError(f"Could not determine {hint_key} for dataset {dataset_name}")
+        return float(parsed)
 
-        resolved_path = resolve_dataset_path(str(raw_input), data_root)  # CHANGE: Resolve dataset path
-        head_trim = float(dataset_entry.get("head_trim_min", default_head_trim))  # CHANGE: Determine head trim
-        preprocess = load_and_preprocess(resolved_path, head_trim)  # CHANGE: Preprocess dataset
-        hints = preprocess.metadata.get("hints", {})  # CHANGE: Extract metadata hints
+    temperature = _hint_or_parse(["t", "temp", "temperature"], ["t"], "T_C")
+    humidity = _hint_or_parse(["rh"], ["rh"], "RH_pct")
+    velocity = _hint_or_parse(["v", "vel", "velocity"], ["v"], "v_ms")
+    try:
+        thickness = _hint_or_parse(["thickness", "thick", "th"], ["thickness", "th"], "thickness_mm")
+    except ValueError:
+        thickness = None
+        lowered = [t.lower() for t in tokens]
+        for idx, token in enumerate(lowered):
+            if token == "t" and idx + 1 < len(tokens):
+                next_token = tokens[idx + 1]
+                if "mm" in next_token.lower() or next_token.lower().startswith("th"):
+                    candidate = parse_numeric_token(next_token)
+                    if candidate is not None:
+                        thickness = candidate
+                        break
+            if token.startswith("t") and "mm" in token and len(token) > 1:
+                candidate = parse_numeric_token(tokens[idx][1:])
+                if candidate is not None:
+                    thickness = candidate
+                    break
+        if thickness is None:
+            hint_val = hints.get("thickness_mm") or hints.get("thickness")
+            if isinstance(hint_val, (int, float)):
+                thickness = float(hint_val)
+        if thickness is None:
+            raise ValueError(f"Could not determine thickness for dataset {dataset_name}")
 
-        feature_values = {  # CHANGE: Static feature fields
-            "dataset_index": dataset_index,  # CHANGE: Dataset index
-            "dataset_name": resolved_path.name,  # CHANGE: Dataset name
-            "dataset_stem": resolved_path.stem,  # CHANGE: Dataset stem
-            "T": hints.get("T_C"),  # CHANGE: Temperature hint
-            "RH": hints.get("RH_pct"),  # CHANGE: Humidity hint
-            "velocity": hints.get("v_ms"),  # CHANGE: Velocity hint
-            "thickness": hints.get("thickness_mm"),  # CHANGE: Thickness hint
+    return EnvironmentFeatures(
+        T=float(temperature),
+        RH=float(humidity),
+        velocity=float(velocity),
+        thickness=float(thickness),
+    )
+
+
+def summary_parent_map(nodes: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    parent_map: Dict[str, Dict[str, Any]] = {}
+    for node in nodes.values():
+        children = node.get("children")
+        if isinstance(children, list):
+            for child_id in children:
+                if child_id in nodes:
+                    parent_map[child_id] = node
+    return parent_map
+
+
+def compute_lowess_diagnostics(time: np.ndarray, residuals: np.ndarray) -> Tuple[float, float]:
+    if not HAVE_LOWESS or time.size < 5:
+        return float("nan"), float("nan")
+    try:
+        span = float(np.clip(5.0 / max(time.size, 1), 0.1, 0.6))
+        smooth = lowess(residuals, time, frac=span, return_sorted=False)
+    except Exception:  # pragma: no cover - statsmodels runtime errors
+        return float("nan"), float("nan")
+    amplitude = float(np.nanmax(smooth) - np.nanmin(smooth)) if smooth.size else float("nan")
+    if smooth.size >= 3:
+        first_der = np.gradient(smooth, time)
+        second_der = np.gradient(first_der, time)
+        curvature = float(np.nanmax(np.abs(second_der)))
+    else:
+        curvature = float("nan")
+    return curvature, amplitude
+
+
+def gather_segment_records(
+    dataset_index: int,
+    dataset_name: str,
+    summary: Dict[str, Any],
+    preprocess,
+    env: EnvironmentFeatures,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    nodes_raw = summary.get("nodes", [])
+    if not isinstance(nodes_raw, list):
+        raise ValueError(f"Summary for {dataset_name} is missing node list")
+    nodes = {node["node_id"]: node for node in nodes_raw if isinstance(node, dict) and "node_id" in node}
+    if not nodes:
+        raise ValueError(f"No nodes found for {dataset_name}")
+
+    parent_map = summary_parent_map(nodes)
+    config = summary.get("config", {}) if isinstance(summary.get("config"), dict) else {}
+    min_points_leaf = int(config.get("min_points_leaf", 0))
+
+    time = preprocess.time_min.astype(float)
+    actual = preprocess.mr_iso.astype(float)
+
+    leaves = [node for node in nodes.values() if not node.get("children")]
+    leaves.sort(key=lambda node: (int(node.get("start_idx", 0)), node.get("node_id", "")))
+
+    records: List[Dict[str, Any]] = []
+    diagnostics: List[Dict[str, Any]] = []
+
+    prev_end_mr: float | None = None
+
+    for order, node in enumerate(leaves):
+        unsplit_info = node.get("unsplit", {})
+        if not isinstance(unsplit_info, dict):
+            unsplit_info = {}
+        params = unsplit_info.get("params", {})
+        k = float(params.get("k", float("nan")))
+        n = float(params.get("n", float("nan")))
+        b = float(params.get("b", float("nan")))
+        if not all(math.isfinite(x) for x in (k, n, b)):
+            continue
+
+        start_idx = int(node.get("start_idx", 0))
+        end_idx = int(node.get("end_idx", start_idx))
+        if end_idx <= start_idx:
+            continue
+        segment_time = time[start_idx:end_idx]
+        if segment_time.size == 0:
+            continue
+        segment_actual = actual[start_idx:end_idx]
+
+        raw_preds = midilli_curve(segment_time, k, n, b)
+        raw_preds = clip_mr(raw_preds)
+        continuity_shift = 0.0
+        if prev_end_mr is not None and raw_preds.size:
+            continuity_shift = float(raw_preds[0] - prev_end_mr)
+            raw_preds = clip_mr(raw_preds - continuity_shift)
+        segment_start_mr = float(raw_preds[0]) if raw_preds.size else float("nan")
+        segment_end_mr = float(raw_preds[-1]) if raw_preds.size else float("nan")
+        prev_end_mr = segment_end_mr if math.isfinite(segment_end_mr) else prev_end_mr
+
+        residuals = segment_actual - raw_preds
+        rms = float(np.sqrt(np.nanmean(np.square(residuals)))) if residuals.size else float("nan")
+        curvature, amplitude = compute_lowess_diagnostics(segment_time, residuals)
+
+        start_time = float(segment_time[0])
+        end_time = float(segment_time[-1])
+        duration = max(end_time - start_time, 0.0)
+        mid_time = start_time + duration / 2.0
+
+        parent = parent_map.get(node["node_id"])
+        join_gap = float(abs(parent.get("gap", 0.0))) if parent else 0.0
+        is_root = bool(node.get("depth", 0) == 0)
+        n_obs = int(end_idx - start_idx)
+        min_points_hit = bool(n_obs < min_points_leaf)
+        family = unsplit_info.get("family", "")
+        if family is None:
+            family = ""
+        else:
+            family = str(family)
+
+        record = {
+            "dataset_index": dataset_index,
+            "dataset_name": dataset_name,
+            "source_path": str(summary.get("file", "")),
+            "segment_index": order,
+            "segment_path": node.get("node_id"),
+            "segment_position": order + 1,
+            "segment_start_time": start_time,
+            "segment_end_time": end_time,
+            "segment_duration": duration,
+            "segment_mid_time": mid_time,
+            "segment_start_MR": segment_start_mr,
+            "segment_end_MR": segment_end_mr,
+            "n_obs": n_obs,
+            "depth": int(node.get("depth", 0)),
+            "join_gap": join_gap,
+            "left_slope": float(midilli_derivative(np.array([start_time]), k, n, b)[0]),
+            "right_slope": float(midilli_derivative(np.array([end_time]), k, n, b)[0]),
+            "resid_rms_segment": rms,
+            "lowess_curvature": curvature,
+            "lowess_amplitude": amplitude,
+            "is_root": 1 if is_root else 0,
+            "is_leaf": 1,
+            "min_points_constraint_hit": 1 if min_points_hit else 0,
+            "family": family,
+            "k": k,
+            "n": n,
+            "b": b,
+            "continuity_shift": continuity_shift,
+            "T": env.T,
+            "RH": env.RH,
+            "velocity": env.velocity,
+            "thickness": env.thickness,
         }
+        records.append(record)
 
-        time_full = pd.Series(preprocess.time_min)  # CHANGE: Time series
-        mr_full = pd.Series(preprocess.mr_iso)  # CHANGE: MR series
-
-        tree = dataset_entry.get("tree")  # CHANGE: Tree retrieval
-        if not isinstance(tree, dict):  # CHANGE: Guard invalid tree
-            logger.warning("Dataset %s has invalid tree structure; skipping", resolved_path.name)  # CHANGE: Warning log
-            continue  # CHANGE: Continue loop
-
-        for leaf_idx, (node, depth, path) in enumerate(iter_leaf_segments(tree)):  # CHANGE: Iterate leaf segments
-            params = node.get("params", {}) if isinstance(node, dict) else {}  # CHANGE: Parameters retrieval
-            t_start = float(node.get("t_start") or float("nan"))  # CHANGE: Segment start
-            t_end = float(node.get("t_end") or float("nan"))  # CHANGE: Segment end
-            t_end = t_end if pd.notna(t_end) else t_start  # CHANGE: Fallback end time
-
-            segment_mask = (time_full >= t_start) & (time_full <= t_end + 1e-9)  # CHANGE: Segment mask
-            time_segment = time_full.loc[segment_mask].dropna().sort_values()  # CHANGE: Segment times
-            mr_segment = mr_full.loc[segment_mask].reindex(time_segment.index)  # CHANGE: Segment MR values
-            monotonic = check_time_monotonicity(time_segment.to_numpy(dtype=float))  # CHANGE: Monotonic check
-            has_duplicates = time_segment.duplicated().any()  # CHANGE: Duplicate detection
-
-            if not monotonic or has_duplicates:  # CHANGE: Log anomalies
-                logger.warning(
-                    "Time monotonicity issue in %s segment %s (monotonic=%s, duplicates=%s)",
-                    resolved_path.name,
-                    path,
-                    monotonic,
-                    has_duplicates,
-                )  # CHANGE: Warning log
-
-            segment_start_mr = float(mr_segment.iloc[0]) if not mr_segment.empty else float("nan")  # CHANGE: Start MR
-            segment_end_mr = float(mr_segment.iloc[-1]) if not mr_segment.empty else float("nan")  # CHANGE: End MR
-
-            record = {  # CHANGE: Segment record assembly
-                **feature_values,
-                "segment_index": leaf_idx,
-                "segment_path": path,
-                "segment_position": depth,
-                "segment_start_time": t_start,
-                "segment_end_time": t_end,
-                "segment_duration": t_end - t_start,
-                "n_obs": node.get("n_obs"),
-                "rmse": node.get("rmse"),
-                "aicc": node.get("aicc"),
-                "k": params.get("k"),
-                "n": params.get("n"),
-                "b": params.get("b"),
+        diagnostics.append(
+            {
+                "dataset_name": dataset_name,
+                "segment_index": order,
+                "segment_path": node.get("node_id"),
+                "continuity_shift": continuity_shift,
+                "join_gap": join_gap,
+                "segment_start_time": start_time,
+                "segment_end_time": end_time,
                 "segment_start_MR": segment_start_mr,
                 "segment_end_MR": segment_end_mr,
+                "resid_rms_segment": rms,
+                "lowess_curvature": curvature,
+                "lowess_amplitude": amplitude,
             }
-            records.append(record)  # CHANGE: Append record
+        )
 
-            diagnostics_records.append(  # CHANGE: Append diagnostics
-                {
-                    "dataset_name": resolved_path.name,
-                    "segment_index": leaf_idx,
-                    "segment_path": path,
-                    "segment_start_time": t_start,
-                    "segment_end_time": t_end,
-                    "segment_start_MR": segment_start_mr,
-                    "segment_end_MR": segment_end_mr,
-                    "time_monotonic": bool(monotonic),
-                    "has_duplicate_time": bool(has_duplicates),
-                    "segment_obs_count": int(len(time_segment)),
-                }
-            )
-
-    if not records:  # CHANGE: Guard missing segments
-        raise RuntimeError("No segment records were extracted from the summary index.")  # CHANGE: Error message
-
-    df = pd.DataFrame.from_records(records)  # CHANGE: Create DataFrame
-    df.sort_values(["dataset_index", "segment_start_time"], inplace=True, ignore_index=True)  # CHANGE: Sort segments
-    df["segment_order"] = df.groupby("dataset_name").cumcount()  # CHANGE: Order within dataset
-
-    diagnostics_df = pd.DataFrame(diagnostics_records)  # CHANGE: Diagnostics DataFrame
-    if not diagnostics_df.empty:  # CHANGE: Merge diagnostics order
-        diagnostics_df = diagnostics_df.merge(
-            df[["dataset_name", "segment_index", "segment_order"]],
-            on=["dataset_name", "segment_index"],
-            how="left",
-        )  # CHANGE: Attach order info
-
-    continuity_df = segment_discontinuities(df)  # CHANGE: Compute continuity gaps
-    if not continuity_df.empty:  # CHANGE: Annotate continuity diagnostics
-        continuity_df.rename(columns={"gap": "continuity_gap"}, inplace=True)  # CHANGE: Rename gap column
-        continuity_df["is_continuity_violation"] = continuity_df["continuity_gap"].astype(float) > continuity_threshold  # CHANGE: Violation flag
-        diagnostics_df = diagnostics_df.merge(
-            continuity_df,
-            left_on=["dataset_name", "segment_order"],
-            right_on=["dataset_name", "segment_index"],
-            how="left",
-            suffixes=("", "_continuity"),
-        )  # CHANGE: Merge continuity info
-    else:  # CHANGE: Continuity fallback
-        diagnostics_df["continuity_gap"] = pd.NA  # CHANGE: Fill NA
-        diagnostics_df["is_continuity_violation"] = pd.NA  # CHANGE: Fill NA
-
-    df.to_csv(output_path, index=False)  # CHANGE: Write dataset CSV
-    logger.info("Wrote %s segment rows to %s", len(df), output_path)  # CHANGE: Log output size
-
-    diagnostics_path = diagnostics_dir / "phase2A_report.csv"  # CHANGE: Diagnostics path
-    diagnostics_df.to_csv(diagnostics_path, index=False)  # CHANGE: Write diagnostics CSV
-    logger.info(
-        "Recorded diagnostics for %s segments to %s", len(diagnostics_df), diagnostics_path
-    )  # CHANGE: Log diagnostics path
+    return records, diagnostics
 
 
-if __name__ == "__main__":  # CHANGE: Script guard
-    main()  # CHANGE: Invoke main
+def load_summary_index(summary_path: Path, data_root: Path) -> Dict[str, Tuple[Path, float]]:
+    if not summary_path.exists():
+        return {}
+    payload = json.loads(summary_path.read_text())
+    registry: Dict[str, Tuple[Path, float]] = {}
+    if isinstance(payload.get("datasets"), list):
+        default_trim = float(payload.get("head_trim_min", 0.0))
+        for entry in payload["datasets"]:
+            raw_input = entry.get("input")
+            if not raw_input:
+                continue
+            resolved = resolve_dataset_path(raw_input, data_root)
+            head_trim = float(entry.get("head_trim_min", default_trim))
+            registry[Path(raw_input).stem] = (resolved, head_trim)
+    elif isinstance(payload.get("summaries"), list):
+        for entry in payload["summaries"]:
+            raw_input = entry.get("file")
+            if not raw_input:
+                continue
+            resolved = resolve_dataset_path(raw_input, data_root)
+            head_trim = float(entry.get("head_trim_min", 0.0))
+            key = Path(raw_input).stem
+            registry[key] = (resolved, head_trim)
+    return registry
+
+
+def resolve_dataset_path_with_registry(
+    summary: Dict[str, Any],
+    dataset_name: str,
+    registry: Dict[str, Tuple[Path, float]],
+    data_root: Path,
+) -> Tuple[Path, float]:
+    raw_file = summary.get("file")
+    if raw_file:
+        try:
+            resolved = resolve_dataset_path(raw_file, data_root)
+            key = Path(raw_file).stem
+            head_trim = registry.get(key, (None, 0.0))[1] if registry else 0.0
+            return resolved, float(head_trim)
+        except FileNotFoundError:
+            pass
+    if registry:
+        if dataset_name in registry:
+            return registry[dataset_name]
+        alt = Path(dataset_name).stem
+        if alt in registry:
+            return registry[alt]
+    candidate = resolve_dataset_path(f"{dataset_name}.csv", data_root)
+    return candidate, 0.0
+
+
+def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+    section = extract_config_section(config, "phase2A")
+
+    runs_root = Path(section.get("runs_root", args.runs_root))
+    summary_index_path = Path(section.get("summary_index", args.summary_index))
+    data_root = Path(section.get("data_root", args.data_root))
+    output_path = Path(section.get("output_path", args.output_path))
+    diagnostics_dir = Path(section.get("diagnostics_dir", args.diagnostics_dir))
+    log_dir = Path(section.get("log_dir", args.log_dir))
+    log_level = section.get("log_level", args.log_level)
+
+    ensure_directory(output_path.parent)
+    ensure_directory(diagnostics_dir)
+    log_path = ensure_directory(log_dir) / f"{DEFAULT_LOGGER_NAME.replace('.', '_')}.log"
+    logger = configure_logging(DEFAULT_LOGGER_NAME, log_path=log_path, level=log_level)
+
+    if not runs_root.exists():
+        raise FileNotFoundError(f"Runs root not found: {runs_root}")
+
+    registry = load_summary_index(summary_index_path, data_root)
+
+    all_records: List[Dict[str, Any]] = []
+    diagnostics_records: List[Dict[str, Any]] = []
+
+    for dataset_index, summary_path in enumerate(iter_tree_summaries(runs_root)):
+        dataset_name = summary_path.parent.name
+        logger.info("Processing %s", dataset_name)
+        summary = json.loads(summary_path.read_text())
+        dataset_path, head_trim = resolve_dataset_path_with_registry(summary, dataset_name, registry, data_root)
+        preprocess = load_and_preprocess(dataset_path, head_trim)
+        hints = preprocess.metadata.get("hints", {}) if isinstance(preprocess.metadata, dict) else {}
+        env = extract_environment_features(dataset_name, hints)
+        records, diagnostics = gather_segment_records(dataset_index, dataset_name, summary, preprocess, env)
+        if not records:
+            logger.warning("No segments recorded for %s", dataset_name)
+            continue
+        for record in records:
+            record["head_trim_min"] = preprocess.head_trim_min
+        all_records.extend(records)
+        diagnostics_records.extend(diagnostics)
+
+    if not all_records:
+        raise RuntimeError("No segment records were extracted from recursive Midilli outputs.")
+
+    df = pd.DataFrame.from_records(all_records)
+    df.sort_values(["dataset_name", "segment_start_time"], inplace=True, ignore_index=True)
+    df["segment_index"] = df.groupby("dataset_name").cumcount()
+    df["segment_position"] = df["segment_index"] + 1
+
+    feature_check = prepare_feature_frame(df)
+    core_missing = [col for col in BASE_FEATURE_COLUMNS if feature_check[col].isna().any()]
+    if core_missing:
+        raise ValueError(f"NaNs detected in core features: {core_missing}")
+
+    df["segment_duration"] = df["segment_end_time"] - df["segment_start_time"]
+    df.loc[df["segment_duration"] < 0, "segment_duration"] = 0.0
+
+    df = df[list(dict.fromkeys(list(REQUIRED_COLUMNS) + [c for c in df.columns if c not in REQUIRED_COLUMNS]))]
+
+    df.to_csv(output_path, index=False, float_format="%.9g")
+
+    diagnostics_df = pd.DataFrame.from_records(diagnostics_records)
+    diagnostics_path = diagnostics_dir / "phase2A_diagnostics.csv"
+    diagnostics_df.to_csv(diagnostics_path, index=False, float_format="%.9g")
+
+    logger.info("Wrote %s segment rows to %s", len(df), output_path)
+    logger.info("Diagnostics written to %s", diagnostics_path)
+
+
+if __name__ == "__main__":
+    main()
