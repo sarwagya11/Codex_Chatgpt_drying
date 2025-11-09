@@ -59,6 +59,7 @@ class Config:
     max_iter: int
     seed: int
     log_level: str
+    probe_better_child: bool
     max_allowed_gap_eps: float = 1e-12
     max_allowed_slope_eps: float = 1e-12
     monotonic_eps: float = 5e-6
@@ -93,6 +94,7 @@ class SplitInfo:
     gap: float
     slope_gap: float
     penalized_score: float
+    time_penalty: float
     score_components: Dict[str, float]
     left: FitStats
     right: FitStats
@@ -107,6 +109,7 @@ class Evidence:
     runs_p_value: float
     residual_amplitude: float
     slope_sign_changes: int
+    score: float
 
 
 @dataclass
@@ -138,9 +141,13 @@ class SegmentNode:
                     "gap": float(self.split.gap),
                     "slope_gap": float(self.split.slope_gap),
                     "penalized_score": float(self.split.penalized_score),
+                    "time_penalty": float(self.split.time_penalty),
                     "delta_aicc": float(self.split.delta_aicc),
                     "rel_improvement": float(self.split.rel_improvement),
                     "violations": int(self.split.violations),
+                    "score_components": {
+                        key: float(value) for key, value in self.split.score_components.items()
+                    },
                     "left": self.split.left.to_summary(),
                     "right": self.split.right.to_summary(),
                     "children": [child.node_id for child in self.children],
@@ -152,6 +159,7 @@ class SegmentNode:
                 "runs_p_value": float(self.evidence.runs_p_value),
                 "residual_amplitude": float(self.evidence.residual_amplitude),
                 "slope_sign_changes": int(self.evidence.slope_sign_changes),
+                "score": float(self.evidence.score),
             }
         return payload
 
@@ -229,6 +237,7 @@ class FitCache:
 class BudgetState:
     sum_gaps: float = 0.0
     splits_used: int = 0
+    levels_splits: Dict[int, int] = field(default_factory=dict)
 
 
 def page_model(time: np.ndarray, k: float, n: float) -> np.ndarray:
@@ -672,6 +681,7 @@ def score_candidate(
             gap,
             slope_gap,
             score,
+            time_pen,
             {
                 "base": base,
                 "gap_pen": cfg.join_penalty * (gap**2),
@@ -784,7 +794,9 @@ def compute_child_evidence(
     runs_p, _ = _runs_test(residuals_child)
     amplitude = _residual_lowess_amplitude(time[child_slice], residuals_child, cfg.lowess_frac_root)
     slope_changes = _slope_sign_changes(residuals_child)
-    return Evidence(delta, runs_p, amplitude, slope_changes)
+    runs_component = 1.0 - float(np.clip(runs_p, 0.0, 1.0)) if math.isfinite(runs_p) else 1.0
+    score = float(delta - amplitude - slope_changes - runs_component)
+    return Evidence(delta, runs_p, amplitude, slope_changes, score)
 
 
 def recurse_node(
@@ -832,22 +844,24 @@ def recurse_node(
     node.children = [left_node, right_node]
     budget.sum_gaps += best_info.gap
     budget.splits_used += 1
+    budget.levels_splits[node.depth] = budget.levels_splits.get(node.depth, 0) + 1
     left_node.evidence = compute_child_evidence(left_node, node.fit, time, values, cfg)
     right_node.evidence = compute_child_evidence(right_node, node.fit, time, values, cfg)
 
-    def _evidence_key(child: SegmentNode) -> Tuple[float, float, float, float]:
-        ev = child.evidence
-        if ev is None:
-            return (float("-inf"), float("-inf"), float("-inf"), float("inf"))
-        runs = ev.runs_p_value if math.isfinite(ev.runs_p_value) else 1.0
-        return (
-            float(ev.delta_aicc),
-            float(ev.residual_amplitude),
-            float(ev.slope_sign_changes),
-            -runs,
-        )
+    if cfg.probe_better_child:
+        def _evidence_key(child: SegmentNode) -> Tuple[float, float, float]:
+            ev = child.evidence
+            if ev is None:
+                return (float("-inf"), float("-inf"), float("-inf"))
+            return (
+                float(ev.score),
+                float(ev.delta_aicc),
+                -float(ev.residual_amplitude + ev.slope_sign_changes),
+            )
 
-    ordered_children = sorted(node.children, key=_evidence_key, reverse=True)
+        ordered_children = sorted(node.children, key=_evidence_key, reverse=True)
+    else:
+        ordered_children = list(node.children)
     for child in ordered_children:
         if budget.splits_used >= cfg.max_splits:
             break
@@ -1043,6 +1057,7 @@ CLI_FIELDS = [
     "lowess_frac_root",
     "max_iter",
     "seed",
+    "probe_better_child",
     "log_level",
 ]
 
@@ -1115,16 +1130,18 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
         "config": config_dict,
         "config_digest": config_digest,
         "version": version,
+        "seed": cfg.seed,
         "unsplit": root.fit.to_summary(),
         "nodes": [node.to_dict() for node in gather_nodes(root)],
         "metrics": {
             "sum_gaps": budget.sum_gaps,
             "violations_total": violations,
-            "ΔAICc_total": delta_total,
+            "delta_AICc_total": delta_total,
             "rel_impr_total": rel_total,
             "correction_magnitude": correction_mag,
             "splits_used": budget.splits_used,
             "n_leaves": len(leaves),
+            "levels_splits": {str(depth): count for depth, count in budget.levels_splits.items()},
         },
         "plots": plots,
         "candidate_log": str(candidate_log_path),
@@ -1142,7 +1159,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         conflict_handler="resolve",
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
-    parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
+    parser.add_argument("--outdir", default="outputs", help="Directory to store outputs.")
     parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
@@ -1167,7 +1184,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--reject-nonmonotone",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Reject splits that produce monotonicity violations.",
     )
     parser.add_argument("--total-gap-budget", type=float, default=0.05, help="Total allowed sum of join gaps.")
@@ -1175,6 +1193,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--lowess-frac-root", type=float, default=0.20, help="LOWESS fraction at the root node.")
     parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
     parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
+    parser.add_argument(
+        "--probe-better-child",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Recurse into the higher-evidence child before probing the other side.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
     return parser.parse_args(argv)
 
@@ -1210,6 +1234,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_iter=args.max_iter,
         seed=args.seed,
         log_level=str(args.log_level),
+        probe_better_child=bool(args.probe_better_child),
     )
 
     np.random.seed(cfg.seed)

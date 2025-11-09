@@ -49,6 +49,7 @@ def make_config(**overrides) -> Config:
         max_iter=4000,
         seed=1337,
         log_level="INFO",
+        probe_better_child=overrides.get("probe_better_child", True),
     )
     params.update(overrides)
     return Config(**params)
