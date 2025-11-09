@@ -42,7 +42,7 @@ from kinetics.phase2_utils import (  # noqa: E402
     resolve_dataset_path,
 )
 
-DEFAULT_RUNS_ROOT = _PROJECT_ROOT / "outputs" / "recursive_midilli"
+DEFAULT_RUNS_ROOT = _PROJECT_ROOT / "outputs" / "piecewise_recursive"
 DEFAULT_SUMMARY_INDEX = DEFAULT_RUNS_ROOT / "summary_index.json"
 DEFAULT_OUTPUT_PATH = _PROJECT_ROOT / "outputs" / "phase2" / "segments_dataset.csv"
 DEFAULT_DIAGNOSTICS_DIR = _PROJECT_ROOT / "outputs" / "diagnostics"
