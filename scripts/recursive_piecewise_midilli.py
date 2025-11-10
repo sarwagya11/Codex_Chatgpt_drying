@@ -1303,10 +1303,15 @@ CLI_FIELDS = [
     "shape_penalty_mono",
     "max_allowed_gap",
     "max_allowed_slope_gap",
+    "max_allowed_gap_eps",
+    "max_allowed_slope_eps",
     "reject_nonmonotone",
     "total_gap_budget",
     "time_penalty",
     "lowess_frac_root",
+    "monotonic_eps",
+    "alpha_iso",
+    "lowess_points",
     "max_iter",
     "seed",
     "probe_better_child",
@@ -1440,6 +1445,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-allowed-slope-gap", type=float, default=3e-4, help="Maximum allowed slope discontinuity."
     )
+    parser.add_argument(
+        "--max-allowed-gap-eps",
+        type=float,
+        default=1e-12,
+        help="Tolerance added when comparing against the maximum allowed join gap.",
+    )
+    parser.add_argument(
+        "--max-allowed-slope-eps",
+        type=float,
+        default=1e-12,
+        help="Tolerance added when comparing against the maximum allowed slope discontinuity.",
+    )
     parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
     parser.add_argument("--time-penalty", type=float, default=0.6, help="Penalty weight for split location prior.")
     parser.add_argument("--lowess-frac-root", type=float, default=0.18, help="LOWESS fraction at the root node.")
@@ -1474,6 +1491,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=2.0,
         help="AICc tolerance for preferring Page when Midilli hits parameter bounds.",
     )
+    parser.add_argument(
+        "--monotonic-eps",
+        type=float,
+        default=5e-6,
+        help="Numerical tolerance used when checking for monotonicity violations.",
+    )
+    parser.add_argument(
+        "--alpha-iso",
+        type=float,
+        default=1e-3,
+        help="Step size for isotonic adjustment when enforcing monotonicity.",
+    )
+    parser.add_argument(
+        "--lowess-points",
+        type=int,
+        default=5,
+        help="Number of LOWESS fractions evaluated when selecting candidate smoothing levels.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
     return parser.parse_args(argv)
 
@@ -1502,6 +1537,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         shape_penalty_mono=args.shape_penalty_mono,
         max_allowed_gap=args.max_allowed_gap,
         max_allowed_slope_gap=args.max_allowed_slope_gap,
+        max_allowed_gap_eps=args.max_allowed_gap_eps,
+        max_allowed_slope_eps=args.max_allowed_slope_eps,
         reject_nonmonotone=bool(args.reject_nonmonotone),
         total_gap_budget=args.total_gap_budget,
         time_penalty=args.time_penalty,
@@ -1512,6 +1549,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         probe_better_child=bool(args.probe_better_child),
         lambda_b=args.lambda_b,
         page_fallback_eps=args.page_fallback_eps,
+        monotonic_eps=args.monotonic_eps,
+        alpha_iso=args.alpha_iso,
+        lowess_points=args.lowess_points,
     )
 
     np.random.seed(cfg.seed)
