@@ -10,9 +10,10 @@ import logging
 import math
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, cast
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -36,6 +37,23 @@ from kinetics import load_and_preprocess  # noqa: E402
 
 
 plt.switch_backend("Agg")
+
+
+_GLOBAL_RNG: Optional[np.random.Generator] = None
+
+
+@contextmanager
+def _scipy_random_state() -> Iterator[None]:
+    if _GLOBAL_RNG is None:
+        yield
+        return
+    state = np.random.get_state()
+    seed_value = int(_GLOBAL_RNG.integers(0, 2**32 - 1))
+    np.random.seed(seed_value)
+    try:
+        yield
+    finally:
+        np.random.set_state(state)
 
 
 @dataclass
@@ -80,6 +98,7 @@ class Config:
 class FitStats:
     family: str
     params: Dict[str, float]
+    initial_guess: Dict[str, float]
     rss: float
     rmse: float
     aicc: float
@@ -92,6 +111,7 @@ class FitStats:
         return {
             "family": self.family,
             "params": {key: float(value) for key, value in self.params.items()},
+            "initial_guess": {key: float(value) for key, value in self.initial_guess.items()},
             "AICc": float(self.aicc),
             "RMSE": float(self.rmse),
             "n_obs": int(self.n_obs),
@@ -223,12 +243,14 @@ class CandidateRecord:
     right_n: int
     model_left: str
     params_left: Dict[str, float]
+    guess_left: Dict[str, float]
     aicc_left: float
     rmse_left: float
     hit_bounds_left: Dict[str, bool]
     model_left_reason: str
     model_right: str
     params_right: Dict[str, float]
+    guess_right: Dict[str, float]
     aicc_right: float
     rmse_right: float
     hit_bounds_right: Dict[str, bool]
@@ -269,12 +291,14 @@ class CandidateRecord:
             "right_n": self.right_n,
             "model_left": self.model_left,
             "params_left_json": json.dumps(self.params_left, sort_keys=True),
+            "guess_left_json": json.dumps(self.guess_left, sort_keys=True),
             "AICc_left": self.aicc_left,
             "RMSE_left": self.rmse_left,
             "hit_bounds_left_json": json.dumps(self.hit_bounds_left, sort_keys=True),
             "model_left_reason": self.model_left_reason,
             "model_right": self.model_right,
             "params_right_json": json.dumps(self.params_right, sort_keys=True),
+            "guess_right_json": json.dumps(self.guess_right, sort_keys=True),
             "AICc_right": self.aicc_right,
             "RMSE_right": self.rmse_right,
             "hit_bounds_right_json": json.dumps(self.hit_bounds_right, sort_keys=True),
@@ -416,15 +440,17 @@ def _compute_aicc(n_obs: int, rss: float, k_params: int) -> float:
 
 def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[FitStats]:
     guess = _initial_guess_page(time, values)
+    guess_payload = {"k0": float(guess[0]), "n0": float(guess[1]), "b0": 0.0}
     try:
-        params, _ = curve_fit(
-            lambda t, k, n: page_model(t, k, n),
-            time,
-            values,
-            p0=guess,
-            bounds=PAGE_BOUNDS,
-            maxfev=max_iter,
-        )
+        with _scipy_random_state():
+            params, _ = curve_fit(
+                lambda t, k, n: page_model(t, k, n),
+                time,
+                values,
+                p0=guess,
+                bounds=PAGE_BOUNDS,
+                maxfev=max_iter,
+            )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
     params = np.clip(params, PAGE_BOUNDS[0], PAGE_BOUNDS[1])
@@ -454,6 +480,7 @@ def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[F
         saturates_bound=any(hit_bounds.values()),
         predictions=predictions,
         hit_bounds=hit_bounds,
+        initial_guess=guess_payload,
     )
 
 
@@ -464,16 +491,18 @@ def _fit_midilli(
     bounds: Tuple[np.ndarray, np.ndarray],
 ) -> Optional[FitStats]:
     guess = _initial_guess_midilli(time, values, bounds)
+    guess_payload = {"k0": float(guess[0]), "n0": float(guess[1]), "b0": float(guess[2])}
 
     try:
-        params, _ = curve_fit(
-            lambda t, k, n, b: midilli_model(t, k, n, b),
-            time,
-            values,
-            p0=guess,
-            bounds=bounds,
-            maxfev=max_iter,
-        )
+        with _scipy_random_state():
+            params, _ = curve_fit(
+                lambda t, k, n, b: midilli_model(t, k, n, b),
+                time,
+                values,
+                p0=guess,
+                bounds=bounds,
+                maxfev=max_iter,
+            )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
     params = np.clip(params, bounds[0], bounds[1])
@@ -501,6 +530,7 @@ def _fit_midilli(
         saturates_bound=saturates,
         predictions=predictions,
         hit_bounds=hit_bounds,
+        initial_guess=guess_payload,
     )
 
 
@@ -888,12 +918,14 @@ def score_candidate(
             right_n=right_n,
             model_left=left_stats.family if left_stats else "",
             params_left=left_stats.params if left_stats else {},
+            guess_left=left_stats.initial_guess if left_stats else {},
             aicc_left=left_stats.aicc if left_stats else float("nan"),
             rmse_left=left_stats.rmse if left_stats else float("nan"),
             hit_bounds_left=left_stats.hit_bounds if left_stats else {},
             model_left_reason=left_reason,
             model_right=right_stats.family if right_stats else "",
             params_right=right_stats.params if right_stats else {},
+            guess_right=right_stats.initial_guess if right_stats else {},
             aicc_right=right_stats.aicc if right_stats else float("nan"),
             rmse_right=right_stats.rmse if right_stats else float("nan"),
             hit_bounds_right=right_stats.hit_bounds if right_stats else {},
@@ -1063,12 +1095,14 @@ def score_candidate(
         right_n=right_n,
         model_left=left_stats.family,
         params_left=left_stats.params,
+        guess_left=left_stats.initial_guess,
         aicc_left=left_stats.aicc,
         rmse_left=left_stats.rmse,
         hit_bounds_left=left_stats.hit_bounds,
         model_left_reason=left_reason,
         model_right=right_stats.family,
         params_right=right_stats.params,
+        guess_right=right_stats.initial_guess,
         aicc_right=right_stats.aicc,
         rmse_right=right_stats.rmse,
         hit_bounds_right=right_stats.hit_bounds,
@@ -1439,12 +1473,14 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "right_n",
         "model_left",
         "params_left_json",
+        "guess_left_json",
         "AICc_left",
         "RMSE_left",
         "hit_bounds_left_json",
         "model_left_reason",
         "model_right",
         "params_right_json",
+        "guess_right_json",
         "AICc_right",
         "RMSE_right",
         "hit_bounds_right_json",
@@ -1638,6 +1674,11 @@ def _get_version() -> Optional[str]:
 
 
 def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
+    global _GLOBAL_RNG
+    if _GLOBAL_RNG is None:
+        _GLOBAL_RNG = np.random.default_rng(cfg.seed)
+        np.random.seed(cfg.seed)
+
     logger = logging.getLogger(__name__)
     result = load_and_preprocess(path)
     time = result.time_min.astype(float)
@@ -1820,6 +1861,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Only keep isotonic correction if RMSE improves by at least this tolerance.",
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse arguments, emit the resolved configuration as JSON, and exit without processing data.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1865,7 +1911,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         iso_rmse_tol=args.iso_rmse_tol,
     )
 
+    global _GLOBAL_RNG
+    _GLOBAL_RNG = np.random.default_rng(cfg.seed)
     np.random.seed(cfg.seed)
+
+    if getattr(args, "dry_run", False):
+        print(json.dumps(_config_to_dict(cfg), indent=2))
+        return 0
 
     if not cfg.data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {cfg.data_dir}")
