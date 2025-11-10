@@ -14,6 +14,7 @@ if str(SCRIPTS) not in sys.path:
 from recursive_piecewise_midilli import (  # noqa: E402
     BudgetState,
     Config,
+    DEFAULT_MIDILLI_SOFT_BOUND,
     FitCache,
     SegmentNode,
     compute_unsplit_fit,
@@ -50,8 +51,14 @@ def make_config(**overrides) -> Config:
         seed=1337,
         log_level="INFO",
         probe_better_child=overrides.get("probe_better_child", True),
+        probe_better_child_passes=overrides.get("probe_better_child_passes", 1),
         lambda_b=overrides.get("lambda_b", 50.0),
+        midilli_b_softbound=overrides.get("midilli_b_softbound", DEFAULT_MIDILLI_SOFT_BOUND),
         page_fallback_eps=overrides.get("page_fallback_eps", 0.2),
+        midbody_aicc_tolerance=overrides.get("midbody_aicc_tolerance", 0.05),
+        monotonic_hardcap=overrides.get("monotonic_hardcap", 0),
+        export_leaves_csv=overrides.get("export_leaves_csv", False),
+        no_plots=overrides.get("no_plots", True),
     )
     params.update(overrides)
     return Config(**params)
