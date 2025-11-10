@@ -68,6 +68,7 @@ class Config:
     probe_better_child: bool
     lambda_b: float
     page_fallback_eps: float
+    candidate_min_spacing: int = 4
     max_allowed_gap_eps: float = 1e-12
     max_allowed_slope_eps: float = 1e-12
     monotonic_eps: float = 5e-6
@@ -672,8 +673,13 @@ def generate_candidates(
             if allowed_min <= candidate <= allowed_max:
                 lowess_indices.add(candidate)
     candidates = sorted(grid_indices.union(lowess_indices))
+    min_spacing = max(1, int(cfg.candidate_min_spacing))
+    spaced_candidates: List[int] = []
+    for candidate in candidates:
+        if not spaced_candidates or candidate - spaced_candidates[-1] >= min_spacing:
+            spaced_candidates.append(candidate)
     feasible: List[int] = []
-    for split_idx in candidates:
+    for split_idx in spaced_candidates:
         left_len = split_idx - start + 1
         right_len = end - (split_idx + 1)
         if left_len < cfg.min_points_leaf or right_len < cfg.min_points_leaf:
@@ -1530,6 +1536,7 @@ CLI_FIELDS = [
     "min_points_root",
     "min_points_leaf",
     "candidate_grid_count",
+    "candidate_min_spacing",
     "lowess_frac_min",
     "lowess_frac_max",
     "min_fraction",
@@ -1682,6 +1689,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Minimum points required for child segments; root defaults satisfy >= 2x this value.",
     )
     parser.add_argument("--candidate-grid-count", type=int, default=800, help="Uniform grid candidate count.")
+    parser.add_argument(
+        "--candidate-min-spacing",
+        type=int,
+        default=4,
+        help="Minimum spacing between consecutive candidate indices before feasibility checks.",
+    )
     parser.add_argument("--lowess-frac-min", type=float, default=0.8, help="Minimum LOWESS fraction for candidates.")
     parser.add_argument("--lowess-frac-max", type=float, default=0.35, help="Maximum LOWESS fraction for candidates.")
     parser.add_argument("--min-fraction", type=float, default=0.05, help="Minimum fractional position for splits.")
@@ -1777,6 +1790,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         min_points_root=args.min_points_root,
         min_points_leaf=args.min_points_leaf,
         candidate_grid_count=args.candidate_grid_count,
+        candidate_min_spacing=args.candidate_min_spacing,
         lowess_frac_min=args.lowess_frac_min,
         lowess_frac_max=args.lowess_frac_max,
         min_fraction=args.min_fraction,
