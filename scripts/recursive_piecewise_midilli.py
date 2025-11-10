@@ -1292,9 +1292,9 @@ def create_plots(
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(time, values, "o", label="Observed", alpha=0.6)
-    ax.plot(time, preds, "-", label="Piecewise fit", linewidth=2)
+    ax.plot(time, preds, "-", label="Piecewise fit (raw)", linewidth=2)
     if np.any(corrected != preds):
-        ax.plot(time, corrected, "--", label="Isotonic adj.")
+        ax.plot(time, corrected, "--", label="Isotonic fit")
     for split_time, gap, slope_gap in splits:
         ax.axvline(split_time, color="red", linestyle="--", alpha=0.6)
         ax.text(
