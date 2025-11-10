@@ -10,7 +10,7 @@ import logging
 import math
 import subprocess
 import sys
-import time
+import time as timemod
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -747,11 +747,11 @@ def generate_candidates(
     end = node.end
     length = end - start
     if length < cfg.min_points_leaf * 2:
-        return []
+        return [], CandidateMeta(node.node_id, 0, 0, 0, 0, 0)
     allowed_min = start + cfg.min_points_leaf - 1
     allowed_max = end - cfg.min_points_leaf - 1
     if allowed_min > allowed_max:
-        return []
+        return [], CandidateMeta(node.node_id, 0, 0, 0, 0, 0)
     grid = np.linspace(allowed_min, allowed_max, cfg.candidate_grid_count)
     grid_indices = {int(round(idx)) for idx in grid}
     raw_grid = len(grid_indices)
@@ -1199,7 +1199,7 @@ def score_candidate(
         rejected = True
         reason = "slope_limit"
         tests.append("slope_limit")
-    if cfg.monotonic_hardcap >= 0 and violations > cfg.monotonic_hardcap:
+    if cfg.monotonic_hardcap > 0 and violations > cfg.monotonic_hardcap:
         rejected = True
         reason = "monotonic_hardcap"
         tests.append("monotonic_hardcap")
@@ -1336,7 +1336,6 @@ def score_candidate(
         k_dist_right=k_dist_right,
         n_dist_right=n_dist_right,
         b_dist_right=b_dist_right,
-        slope_residual_after_shift=slope_residual_after_shift,
     )
     return split_info, record
 
@@ -2102,41 +2101,41 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
         np.random.seed(cfg.seed)
 
     logger = logging.getLogger(__name__)
-    dataset_start = time.perf_counter()
+    dataset_start = timemod.perf_counter()
     result = load_and_preprocess(path)
-    time = result.time_min.astype(float)
-    values = result.mr_iso.astype(float)
-    mask = np.isfinite(time) & np.isfinite(values)
-    dropped_nonfinite = int(time.size - int(np.count_nonzero(mask)))
+    t = result.time_min.astype(float)
+    y = result.mr_iso.astype(float)
+    mask = np.isfinite(t) & np.isfinite(y)
+    dropped_nonfinite = int(t.size - int(np.count_nonzero(mask)))
     if dropped_nonfinite:
         logger.warning(
             "Dataset %s dropped %d rows with non-finite entries.", path.name, dropped_nonfinite
         )
-        time = time[mask]
-        values = values[mask]
-    if time.size == 0:
+        t = t[mask]
+        y = y[mask]
+    if t.size == 0:
         raise RuntimeError(f"Dataset {path} contains no valid rows after filtering")
-    if time.size < cfg.min_points_root:
+    if t.size < cfg.min_points_root:
         logger.warning(
             "Dataset %s has only %d points (< min_points_root=%d); recursion disabled.",
             path.name,
-            time.size,
+            t.size,
             cfg.min_points_root,
         )
     cache = FitCache()
-    root_fit = compute_unsplit_fit(0, time.size, time, values, cache, cfg)
+    root_fit = compute_unsplit_fit(0, t.size, t, y, cache, cfg)
     if root_fit is None:
         raise RuntimeError(f"Unable to fit baseline model for {path}")
-    root = SegmentNode(node_id="0", start=0, end=time.size, depth=0, fit=root_fit)
+    root = SegmentNode(node_id="0", start=0, end=t.size, depth=0, fit=root_fit)
     candidate_records: List[CandidateRecord] = []
     candidate_meta_records: List[CandidateMeta] = []
     lowess_cache: Dict[Tuple[int, int, float], np.ndarray] = {}
     budget = BudgetState()
-    if time.size >= cfg.min_points_root:
+    if t.size >= cfg.min_points_root:
         recurse_node(
             root,
-            time,
-            values,
+            t,
+            y,
             cache,
             cfg,
             path.stem,
@@ -2149,12 +2148,12 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
         )
 
     for node in gather_nodes(root):
-        update_node_diagnostics(node, time, values, cfg)
+        update_node_diagnostics(node, t, y, cfg)
 
-    preds, corrected, violations, iso_used = reconstruct_predictions(root, time, values, cfg)
+    preds, corrected, violations, iso_used = reconstruct_predictions(root, t, y, cfg)
     iso_violations = _count_monotonic_violations(corrected, cfg.monotonic_eps)
-    rmse_raw = float(np.sqrt(np.mean((preds - values) ** 2)))
-    rmse_corrected = float(np.sqrt(np.mean((corrected - values) ** 2)))
+    rmse_raw = float(np.sqrt(np.mean((preds - y) ** 2)))
+    rmse_corrected = float(np.sqrt(np.mean((corrected - y) ** 2)))
     leaves = [node for node in gather_nodes(root) if node.is_leaf()]
     leaf_aicc = sum(leaf.fit.aicc for leaf in leaves)
     delta_total = root.fit.aicc - leaf_aicc
@@ -2162,7 +2161,7 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     correction_mag = float(np.max(np.abs(corrected - preds)))
 
     dataset_outdir = cfg.outdir / path.stem
-    plots = create_plots(dataset_outdir / "plots", path.stem, time, values, preds, corrected, root, cfg)
+    plots = create_plots(dataset_outdir / "plots", path.stem, t, y, preds, corrected, root, cfg)
     candidate_log_path = dataset_outdir / "candidate_log.csv"
     write_candidate_log(candidate_log_path, candidate_records)
     meta_log_path = dataset_outdir / "candidates_meta.csv"
@@ -2195,8 +2194,8 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
                     [
                         leaf.start,
                         leaf.end,
-                        float(time[leaf.start]),
-                        float(time[leaf.end - 1]),
+                        float(t[leaf.start]),
+                        float(t[leaf.end - 1]),
                         leaf.fit.family,
                         float(leaf.fit.params.get("k", float("nan"))),
                         float(leaf.fit.params.get("n", float("nan"))),
@@ -2211,8 +2210,8 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     config_dict = _config_to_dict(cfg)
     config_digest = hashlib.sha1(json.dumps(config_dict, sort_keys=True).encode("utf-8")).hexdigest()
     version = _get_version()
-    runtime_seconds = time.perf_counter() - dataset_start
-    status = "insufficient_points" if time.size < cfg.min_points_root else "ok"
+    runtime_seconds = timemod.perf_counter() - dataset_start
+    status = "insufficient_points" if t.size < cfg.min_points_root else "ok"
 
     summary = {
         "schema_version": SCHEMA_VERSION,
@@ -2472,12 +2471,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise FileNotFoundError(f"No CSV files found in {cfg.data_dir}")
 
     summaries = []
-    total_start = time.perf_counter()
+    total_start = timemod.perf_counter()
     for path in csv_paths:
         logging.info("Processing %s", path.name)
         summary = process_dataset(path, cfg)
         summaries.append(summary)
-    total_runtime = time.perf_counter() - total_start
+    total_runtime = timemod.perf_counter() - total_start
 
     index_payload = {
         "schema_version": SCHEMA_VERSION,
