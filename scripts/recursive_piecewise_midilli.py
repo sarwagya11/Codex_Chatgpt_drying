@@ -12,7 +12,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -560,7 +560,7 @@ def select_best_model(
     if page is None and mid is None:
         return None
     if page is None:
-        return (mid, "midilli_only")
+        return (cast(FitStats,mid),"midilli_only")
     if mid is None:
         return (page, "page_only")
 
