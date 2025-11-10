@@ -95,8 +95,8 @@ class FitStats:
 class SplitInfo:
     split_index: int
     split_time: float
-    raw_gap: float
-    level_gap: float
+    raw_gap_pre_shift: float
+    post_shift_gap: float
     slope_gap: float
     penalized_score: float
     time_penalty: float
@@ -163,8 +163,11 @@ class SegmentNode:
             payload.update(
                 {
                     "t_split": float(self.split.split_time),
-                    "level_gap": float(self.split.level_gap),
-                    "raw_gap": float(self.split.raw_gap),
+                    "post_shift_gap": float(self.split.post_shift_gap),
+                    "raw_gap_pre_shift": float(self.split.raw_gap_pre_shift),
+                    # Backward compatibility: emit legacy keys for one release.
+                    "level_gap": float(self.split.post_shift_gap),
+                    "raw_gap": float(self.split.raw_gap_pre_shift),
                     "slope_gap": float(self.split.slope_gap),
                     "penalized_score": float(self.split.penalized_score),
                     "time_penalty": float(self.split.time_penalty),
@@ -221,8 +224,8 @@ class CandidateRecord:
     aicc_unsplit: float
     delta_aicc: float
     rel_improvement: float
-    gap: float
-    level_gap: float
+    raw_gap_pre_shift: float
+    post_shift_gap: float
     slope_gap: float
     violations: int
     time_pen: float
@@ -265,8 +268,11 @@ class CandidateRecord:
             "AICc_unsplit": self.aicc_unsplit,
             "delta_AICc": self.delta_aicc,
             "rel_impr": self.rel_improvement,
-            "gap": self.gap,
-            "level_gap": self.level_gap,
+            "raw_gap_pre_shift": self.raw_gap_pre_shift,
+            "post_shift_gap": self.post_shift_gap,
+            # Backward compatibility: emit legacy keys for one release.
+            "gap": self.raw_gap_pre_shift,
+            "level_gap": self.post_shift_gap,
             "slope_gap": self.slope_gap,
             "violations": self.violations,
             "time_pen": self.time_pen,
@@ -828,47 +834,47 @@ def score_candidate(
         reason = "fit_failure"
         tests.append("fit_failure")
         record = CandidateRecord(
-            dataset_name,
-            node.node_id,
-            split_time,
-            split_idx,
-            left_n,
-            right_n,
-            left_stats.family if left_stats else "",
-            left_stats.params if left_stats else {},
-            left_stats.aicc if left_stats else float("nan"),
-            left_stats.rmse if left_stats else float("nan"),
-            left_stats.hit_bounds if left_stats else {},
-            left_reason,
-            right_stats.family if right_stats else "",
-            right_stats.params if right_stats else {},
-            right_stats.aicc if right_stats else float("nan"),
-            right_stats.rmse if right_stats else float("nan"),
-            right_stats.hit_bounds if right_stats else {},
-            right_reason,
-            node.fit.aicc,
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            float("nan"),
-            rejected,
-            reason,
-            accept_reason,
-            tests,
+            file=dataset_name,
+            node_id=node.node_id,
+            t_split=split_time,
+            t_idx=split_idx,
+            left_n=left_n,
+            right_n=right_n,
+            model_left=left_stats.family if left_stats else "",
+            params_left=left_stats.params if left_stats else {},
+            aicc_left=left_stats.aicc if left_stats else float("nan"),
+            rmse_left=left_stats.rmse if left_stats else float("nan"),
+            hit_bounds_left=left_stats.hit_bounds if left_stats else {},
+            model_left_reason=left_reason,
+            model_right=right_stats.family if right_stats else "",
+            params_right=right_stats.params if right_stats else {},
+            aicc_right=right_stats.aicc if right_stats else float("nan"),
+            rmse_right=right_stats.rmse if right_stats else float("nan"),
+            hit_bounds_right=right_stats.hit_bounds if right_stats else {},
+            model_right_reason=right_reason,
+            aicc_unsplit=node.fit.aicc,
+            delta_aicc=float("nan"),
+            rel_improvement=float("nan"),
+            raw_gap_pre_shift=float("nan"),
+            post_shift_gap=float("nan"),
+            slope_gap=float("nan"),
+            violations=0,
+            time_pen=0.0,
+            level_shift_applied=0.0,
+            b_pen_left=0.0,
+            b_pen_right=0.0,
+            base_aicc_sum=float("nan"),
+            gap_pen=float("nan"),
+            slope_pen=float("nan"),
+            mono_pen=float("nan"),
+            time_pen_comp=float("nan"),
+            b_pen_left_comp=float("nan"),
+            b_pen_right_comp=float("nan"),
+            penalized_score=float("nan"),
+            rejected_flag=rejected,
+            reject_reason=reason,
+            accept_reason=accept_reason,
+            tests_fired=tests,
         )
         return None, record
 
@@ -885,9 +891,9 @@ def score_candidate(
     value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     right_time = float(time[split_idx + 1])
     value_right, slope_right = _model_value_and_slope(right_stats, right_time)
-    raw_gap = abs(value_left - value_right)
+    raw_gap_pre_shift = abs(value_left - value_right)
     level_shift = value_left - value_right
-    level_gap = abs(value_left - (value_right + level_shift))
+    post_shift_gap = abs(value_left - (value_right + level_shift))
     slope_gap = abs(slope_left - slope_right)
     time_pen = _time_penalty(split_time, node, time, cfg)
     combined_preds = _combine_predictions(
@@ -895,11 +901,11 @@ def score_candidate(
     )
     violations = _count_monotonic_violations(combined_preds, cfg.monotonic_eps)
 
-    if not math.isfinite(base) or not math.isfinite(raw_gap) or not math.isfinite(slope_gap):
+    if not math.isfinite(base) or not math.isfinite(raw_gap_pre_shift) or not math.isfinite(slope_gap):
         rejected = True
         reason = "nan_metric"
         tests.append("nan_metric")
-    if raw_gap > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
+    if raw_gap_pre_shift > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_limit"
         tests.append("gap_limit")
@@ -915,7 +921,7 @@ def score_candidate(
         rejected = True
         reason = "rel_improvement"
         tests.append("rel_improvement")
-    if budget_sum_gaps + raw_gap > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
+    if budget_sum_gaps + raw_gap_pre_shift > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_budget"
         tests.append("gap_budget")
@@ -923,7 +929,9 @@ def score_candidate(
     b_pen_left = _b_penalty(left_stats, cfg)
     b_pen_right = _b_penalty(right_stats, cfg)
 
-    gap_pen_component = cfg.join_penalty * (raw_gap**2) if math.isfinite(raw_gap) else float("nan")
+    gap_pen_component = (
+        cfg.join_penalty * (raw_gap_pre_shift**2) if math.isfinite(raw_gap_pre_shift) else float("nan")
+    )
     slope_pen_component = (
         cfg.slope_penalty * (slope_gap**2) if math.isfinite(slope_gap) else float("nan")
     )
@@ -936,7 +944,9 @@ def score_candidate(
         "mono_pen": mono_pen_component,
         "b_pen_left": b_pen_left,
         "b_pen_right": b_pen_right,
-        "raw_gap": raw_gap,
+        "raw_gap_pre_shift": raw_gap_pre_shift,
+        # Backward compatibility: emit legacy key for one release.
+        "raw_gap": raw_gap_pre_shift,
     }
 
     score = base + gap_pen_component + slope_pen_component
@@ -954,8 +964,8 @@ def score_candidate(
         split_info = SplitInfo(
             split_idx,
             split_time,
-            raw_gap,
-            level_gap,
+            raw_gap_pre_shift,
+            post_shift_gap,
             slope_gap,
             score,
             time_pen,
@@ -977,47 +987,47 @@ def score_candidate(
             tests.append("rejected")
 
     record = CandidateRecord(
-        dataset_name,
-        node.node_id,
-        split_time,
-        split_idx,
-        left_n,
-        right_n,
-        left_stats.family,
-        left_stats.params,
-        left_stats.aicc,
-        left_stats.rmse,
-        left_stats.hit_bounds,
-        left_reason,
-        right_stats.family,
-        right_stats.params,
-        right_stats.aicc,
-        right_stats.rmse,
-        right_stats.hit_bounds,
-        right_reason,
-        node.fit.aicc,
-        delta_aicc,
-        rel_impr,
-        raw_gap,
-        level_gap,
-        slope_gap,
-        violations,
-        time_pen,
-        level_shift,
-        b_pen_left,
-        b_pen_right,
-        score_components["base"],
-        score_components["gap_pen"],
-        score_components["slope_pen"],
-        score_components["mono_pen"],
-        score_components["time_pen"],
-        score_components["b_pen_left"],
-        score_components["b_pen_right"],
-        score,
-        rejected,
-        reason,
-        accept_reason,
-        tests,
+        file=dataset_name,
+        node_id=node.node_id,
+        t_split=split_time,
+        t_idx=split_idx,
+        left_n=left_n,
+        right_n=right_n,
+        model_left=left_stats.family,
+        params_left=left_stats.params,
+        aicc_left=left_stats.aicc,
+        rmse_left=left_stats.rmse,
+        hit_bounds_left=left_stats.hit_bounds,
+        model_left_reason=left_reason,
+        model_right=right_stats.family,
+        params_right=right_stats.params,
+        aicc_right=right_stats.aicc,
+        rmse_right=right_stats.rmse,
+        hit_bounds_right=right_stats.hit_bounds,
+        model_right_reason=right_reason,
+        aicc_unsplit=node.fit.aicc,
+        delta_aicc=delta_aicc,
+        rel_improvement=rel_impr,
+        raw_gap_pre_shift=raw_gap_pre_shift,
+        post_shift_gap=post_shift_gap,
+        slope_gap=slope_gap,
+        violations=violations,
+        time_pen=time_pen,
+        level_shift_applied=level_shift,
+        b_pen_left=b_pen_left,
+        b_pen_right=b_pen_right,
+        base_aicc_sum=score_components["base"],
+        gap_pen=score_components["gap_pen"],
+        slope_pen=score_components["slope_pen"],
+        mono_pen=score_components["mono_pen"],
+        time_pen_comp=score_components["time_pen"],
+        b_pen_left_comp=score_components["b_pen_left"],
+        b_pen_right_comp=score_components["b_pen_right"],
+        penalized_score=score,
+        rejected_flag=rejected,
+        reject_reason=reason,
+        accept_reason=accept_reason,
+        tests_fired=tests,
     )
     return split_info, record
 
@@ -1284,7 +1294,7 @@ def recurse_node(
         right_time_shift_at_boundary=right_time_shift,
     )
     node.children = [left_node, right_node]
-    budget.sum_gaps += best_info.raw_gap
+    budget.sum_gaps += best_info.raw_gap_pre_shift
     budget.splits_used += 1
     budget.levels_splits[node.depth] = budget.levels_splits.get(node.depth, 0) + 1
     left_node.evidence = compute_child_evidence(left_node, node, time, values, cfg)
@@ -1372,6 +1382,9 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "AICc_unsplit",
         "delta_AICc",
         "rel_impr",
+        "raw_gap_pre_shift",
+        "post_shift_gap",
+        # Backward compatibility: emit legacy columns for one release.
         "gap",
         "level_gap",
         "slope_gap",
@@ -1403,7 +1416,7 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
 def collect_split_metrics(node: SegmentNode) -> List[Tuple[float, float, float]]:
     splits: List[Tuple[float, float, float]] = []
     if node.split is not None:
-        splits.append((node.split.split_time, node.split.level_gap, node.split.slope_gap))
+        splits.append((node.split.split_time, node.split.post_shift_gap, node.split.slope_gap))
         for child in node.children:
             splits.extend(collect_split_metrics(child))
     return splits
@@ -1434,7 +1447,7 @@ def create_plots(
         ax.text(
             split_time,
             ax.get_ylim()[0],
-            f"gap={gap:.4f}\nslope={slope_gap:.5f}",
+            f"post_gap={gap:.4f}\nslope={slope_gap:.5f}",
             rotation=90,
             va="bottom",
             ha="right",
