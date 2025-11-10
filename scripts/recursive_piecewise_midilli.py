@@ -1608,6 +1608,13 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
         update_node_diagnostics(node, time, values, cfg)
 
     preds, corrected, violations = reconstruct_predictions(root, time, cfg)
+    rmse_raw = float(np.sqrt(np.mean((preds - values) ** 2)))
+    rmse_corrected = float(np.sqrt(np.mean((corrected - values) ** 2)))
+    if rmse_corrected - rmse_raw > 1e-12:
+        raise RuntimeError(
+            "Isotonic correction increased RMSE: "
+            f"raw={rmse_raw:.6g}, corrected={rmse_corrected:.6g}"
+        )
     leaves = [node for node in gather_nodes(root) if node.is_leaf()]
     leaf_aicc = sum(leaf.fit.aicc for leaf in leaves)
     delta_total = root.fit.aicc - leaf_aicc
@@ -1638,6 +1645,8 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
             "delta_AICc_total": delta_total,
             "rel_impr_total": rel_total,
             "correction_magnitude": correction_mag,
+            "rmse_raw": rmse_raw,
+            "rmse_corrected": rmse_corrected,
             "splits_used": budget.splits_used,
             "n_leaves": len(leaves),
             "levels_splits": {str(depth): count for depth, count in budget.levels_splits.items()},
