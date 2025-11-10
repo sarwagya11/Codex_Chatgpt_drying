@@ -1486,6 +1486,7 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    # Leave duplicate argument definitions as hard errors to expose configuration issues.
     parser = argparse.ArgumentParser(
         description="Recursive piecewise Page/Midilli splitter with continuity and monotonicity controls."
     )
