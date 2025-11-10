@@ -70,7 +70,7 @@ class Config:
     page_fallback_eps: float
     max_allowed_gap_eps: float = 1e-12
     max_allowed_slope_eps: float = 1e-12
-    monotonic_eps: float = 5e-4
+    monotonic_eps: float = 5e-6
     lowess_points: int = 5
     iso_rmse_tol: float = 1e-6
 
@@ -1225,6 +1225,7 @@ def update_node_diagnostics(node: SegmentNode, time: np.ndarray, values: np.ndar
         "lowess_curv": curv,
         "left_slope": left_slope,
         "right_slope": right_slope,
+        "mono_violations_seg": int(_count_monotonic_violations(base_pred, cfg.monotonic_eps)),
     }
 
 
@@ -1266,7 +1267,7 @@ def recurse_node(
         slope_left = _segment_slope_at(best_info.left, left_time)
         slope_right = _segment_slope_at(best_info.right, right_time)
         slope_gap = abs(slope_left - slope_right)
-        slope_tol = max(cfg.max_allowed_slope_gap, cfg.max_allowed_slope_eps)
+        slope_tol = cfg.max_allowed_slope_gap + cfg.max_allowed_slope_eps
         if (
             math.isfinite(slope_left)
             and math.isfinite(slope_right)
@@ -1680,12 +1681,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=15,
         help="Minimum points required for child segments; root defaults satisfy >= 2x this value.",
     )
-    parser.add_argument("--candidate-grid-count", type=int, default=400, help="Uniform grid candidate count.")
-    parser.add_argument("--lowess-frac-min", type=float, default=0.10, help="Minimum LOWESS fraction for candidates.")
-    parser.add_argument("--lowess-frac-max", type=float, default=0.30, help="Maximum LOWESS fraction for candidates.")
+    parser.add_argument("--candidate-grid-count", type=int, default=800, help="Uniform grid candidate count.")
+    parser.add_argument("--lowess-frac-min", type=float, default=0.8, help="Minimum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-max", type=float, default=0.35, help="Maximum LOWESS fraction for candidates.")
     parser.add_argument("--min-fraction", type=float, default=0.05, help="Minimum fractional position for splits.")
     parser.add_argument("--max-fraction", type=float, default=0.95, help="Maximum fractional position for splits.")
-    parser.add_argument("--min-rel-improvement", type=float, default=0.002, help="Minimum relative AICc improvement required.")
+    parser.add_argument("--min-rel-improvement", type=float, default=0.001, help="Minimum relative AICc improvement required.")
     parser.add_argument(
         "--allow-per-segment-model",
         action=argparse.BooleanOptionalAction,
@@ -1695,7 +1696,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--join-penalty", type=float, default=8.0, help="Penalty on squared join gaps.")
     parser.add_argument("--slope-penalty", type=float, default=2.0, help="Penalty on squared slope gaps.")
     parser.add_argument("--shape-penalty-mono", type=float, default=8.0, help="Penalty per monotonicity violation.")
-    parser.add_argument("--max-allowed-gap", type=float, default=0.01, help="Maximum allowed join gap.")
+    parser.add_argument("--max-allowed-gap", type=float, default=0.02, help="Maximum allowed join gap.")
     parser.add_argument(
         "--max-allowed-slope-gap", type=float, default=0.003, help="Maximum allowed slope discontinuity."
     )
@@ -1708,10 +1709,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-allowed-slope-eps",
         type=float,
-        default=1e-12,
+        default=0.005,
         help="Tolerance added when comparing against the maximum allowed slope discontinuity.",
     )
-    parser.add_argument("--total-gap-budget", type=float, default=0.05, help="Total allowed sum of join gaps.")
+    parser.add_argument("--total-gap-budget", type=float, default=0.08, help="Total allowed sum of join gaps.")
     parser.add_argument("--time-penalty", type=float, default=0.05, help="Penalty weight for split location prior.")
     parser.add_argument("--lowess-frac-root", type=float, default=0.18, help="LOWESS fraction at the root node.")
     parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
@@ -1719,7 +1720,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--reject-nonmonotone",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Reject splits that produce monotonicity violations.",
     )
     
@@ -1750,7 +1751,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--lowess-points",
         type=int,
-        default=5,
+        default=7,
         help="Number of LOWESS fractions evaluated when selecting candidate smoothing levels.",
     )
     parser.add_argument(
