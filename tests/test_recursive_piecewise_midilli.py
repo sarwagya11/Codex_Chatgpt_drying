@@ -15,8 +15,10 @@ from recursive_piecewise_midilli import (  # noqa: E402
     BudgetState,
     Config,
     FitCache,
+    FitStats,
     SegmentNode,
     compute_unsplit_fit,
+    midilli_model,
     reconstruct_predictions,
     recurse_node,
 )
@@ -130,3 +132,64 @@ def test_grid_jitter_stability(base_time: np.ndarray):
 
     preds, _, _ = reconstruct_predictions(root_base, base_time, cfg_base)
     assert preds.shape == base_time.shape
+
+
+def test_reconstruct_predictions_enforces_monotone_tail(base_time: np.ndarray):
+    cfg = make_config(alpha_iso=0.1)
+
+    params = {"k": 0.02, "n": 1.1, "b": 0.0}
+    base_preds = midilli_model(base_time, params["k"], params["n"], params["b"])
+
+    root_fit = FitStats(
+        family="Midilli",
+        params=params,
+        rss=0.0,
+        rmse=0.0,
+        aicc=0.0,
+        n_obs=base_time.size,
+        saturates_bound=False,
+        predictions=base_preds,
+        hit_bounds={},
+    )
+
+    tail_start = base_time.size - 8
+    tail_params = {"k": params["k"], "n": params["n"], "b": params["b"]}
+    tail_preds = midilli_model(base_time[tail_start:], tail_params["k"], tail_params["n"], tail_params["b"])
+    tail_fit = FitStats(
+        family="Midilli",
+        params=tail_params,
+        rss=0.0,
+        rmse=0.0,
+        aicc=0.0,
+        n_obs=base_time.size - tail_start,
+        saturates_bound=False,
+        predictions=tail_preds,
+        hit_bounds={},
+    )
+
+    tail_node = SegmentNode(
+        node_id="tail",
+        start=tail_start,
+        end=base_time.size,
+        depth=1,
+        fit=tail_fit,
+        children=[],
+        offset=0.12,
+    )
+
+    root = SegmentNode(
+        node_id="root",
+        start=0,
+        end=base_time.size,
+        depth=0,
+        fit=root_fit,
+        children=[tail_node],
+    )
+
+    preds, corrected, violations = reconstruct_predictions(root, base_time, cfg)
+    assert violations > 0
+    assert np.any(np.diff(preds[tail_start - 1 : tail_start + 2]) > cfg.monotonic_eps)
+
+    diffs = np.diff(corrected)
+    assert np.all(diffs <= cfg.monotonic_eps + 1e-12)
+    assert np.all(corrected[:-1] >= corrected[1:] - cfg.monotonic_eps)
