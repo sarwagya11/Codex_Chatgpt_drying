@@ -282,6 +282,8 @@ class FitCache:
     def put(self, family: str, start: int, end: int, stats: FitStats) -> None:
         self._cache[(family, start, end)] = stats
 
+    def store(self, family: str, start: int, end: int, tag: str, stats: FitStats) -> None:
+        self._cache[(family, start, end, tag)] = stats
 
 @dataclass
 class BudgetState:
@@ -1412,12 +1414,12 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    # Leave duplicate argument definitions as hard errors to expose configuration issues.
     parser = argparse.ArgumentParser(
-        description="Recursive piecewise Page/Midilli splitter with continuity penalties.",
-        conflict_handler="resolve",
+        description="Recursive piecewise Page/Midilli splitter with continuity and monotonicity controls."
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
-    parser.add_argument("--outdir", default="outputs", help="Directory to store outputs.")
+    parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
     parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
