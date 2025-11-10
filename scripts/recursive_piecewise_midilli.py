@@ -312,7 +312,7 @@ def midilli_derivative(time: np.ndarray, k: float, n: float, b: float) -> np.nda
     return page_derivative(time, k, n) + b
 
 
-PAGE_BOUNDS = (np.array([1e-8, 0.1]), np.array([10.0, 3.0]))
+PAGE_BOUNDS = (np.array([1e-8, 0.6]), np.array([3e-1, 2.20]))
 MIDILLI_BOUNDS = (np.array([1e-8, 0.1, -5e-3]), np.array([10.0, 3.0, 0]))
 MIDILLI_SOFT_BOUND = 1e-3
 SCHEMA_VERSION = "2.0.0"
@@ -1375,27 +1375,28 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
     parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
-    parser.add_argument("--max-splits", type=int, default=1, help="Maximum number of splits across the tree.")
+    parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
     parser.add_argument("--min-points-leaf", type=int, default=8, help="Minimum points required for child segments.")
     parser.add_argument("--candidate-grid-count", type=int, default=60, help="Uniform grid candidate count.")
-    parser.add_argument("--lowess-frac-min", type=float, default=0.10, help="Minimum LOWESS fraction for candidates.")
-    parser.add_argument("--lowess-frac-max", type=float, default=0.30, help="Maximum LOWESS fraction for candidates.")
-    parser.add_argument("--min-fraction", type=float, default=0.05, help="Minimum fractional position for splits.")
-    parser.add_argument("--max-fraction", type=float, default=0.95, help="Maximum fractional position for splits.")
+    parser.add_argument("--lowess-frac-min", type=float, default=0.12, help="Minimum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-max", type=float, default=0.32, help="Maximum LOWESS fraction for candidates.")
+    parser.add_argument("--min-fraction", type=float, default=0.08, help="Minimum fractional position for splits.")
+    parser.add_argument("--max-fraction", type=float, default=0.92, help="Maximum fractional position for splits.")
     parser.add_argument("--min-rel-improvement", type=float, default=0.02, help="Minimum relative AICc improvement required.")
     parser.add_argument(
         "--allow-per-segment-model",
-        action="store_true",
+        action="store_true", 
+        default=True,
         help="Evaluate Page vs Midilli per segment and choose the lower AICc.",
     )
-    parser.add_argument("--join-penalty", type=float, default=100.0, help="Penalty on squared join gaps.")
-    parser.add_argument("--slope-penalty", type=float, default=6.0, help="Penalty on squared slope gaps.")
+    parser.add_argument("--join-penalty", type=float, default=200.0, help="Penalty on squared join gaps.")
+    parser.add_argument("--slope-penalty", type=float, default=8.0, help="Penalty on squared slope gaps.")
     parser.add_argument("--shape-penalty-mono", type=float, default=50.0, help="Penalty per monotonicity violation.")
-    parser.add_argument("--max-allowed-gap", type=float, default=0.008, help="Maximum allowed join gap.")
+    parser.add_argument("--max-allowed-gap", type=float, default=0.006, help="Maximum allowed join gap.")
     parser.add_argument(
-        "--max-allowed-slope-gap", type=float, default=5e-4, help="Maximum allowed slope discontinuity."
+        "--max-allowed-slope-gap", type=float, default=3e-4, help="Maximum allowed slope discontinuity."
     )
     parser.add_argument(
         "--reject-nonmonotone",
@@ -1404,8 +1405,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Reject splits that produce monotonicity violations.",
     )
     parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
-    parser.add_argument("--time-penalty", type=float, default=0.5, help="Penalty weight for split location prior.")
-    parser.add_argument("--lowess-frac-root", type=float, default=0.20, help="LOWESS fraction at the root node.")
+    parser.add_argument("--time-penalty", type=float, default=0.6, help="Penalty weight for split location prior.")
+    parser.add_argument("--lowess-frac-root", type=float, default=0.18, help="LOWESS fraction at the root node.")
     parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
     parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
     parser.add_argument(
@@ -1417,7 +1418,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--lambda-b",
         type=float,
-        default=50.0,
+        default=80.0,
         help="Penalty weight applied when |b| exceeds 1e-3 for Midilli segments.",
     )
     parser.add_argument(
