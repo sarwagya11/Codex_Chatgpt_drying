@@ -227,6 +227,13 @@ class CandidateRecord:
     level_shift_applied: float
     b_pen_left: float
     b_pen_right: float
+    base_aicc_sum: float
+    gap_pen: float
+    slope_pen: float
+    mono_pen: float
+    time_pen_comp: float
+    b_pen_left_comp: float
+    b_pen_right_comp: float
     penalized_score: float
     rejected_flag: bool
     reject_reason: str
@@ -264,6 +271,13 @@ class CandidateRecord:
             "level_shift_applied": self.level_shift_applied,
             "b_pen_left": self.b_pen_left,
             "b_pen_right": self.b_pen_right,
+            "base_aicc_sum": self.base_aicc_sum,
+            "gap_pen": self.gap_pen,
+            "slope_pen": self.slope_pen,
+            "mono_pen": self.mono_pen,
+            "time_pen_comp": self.time_pen_comp,
+            "b_pen_left_comp": self.b_pen_left_comp,
+            "b_pen_right_comp": self.b_pen_right_comp,
             "penalized_score": self.penalized_score,
             "rejected_flag": self.rejected_flag,
             "reject_reason": self.reject_reason,
@@ -777,6 +791,13 @@ def score_candidate(
             0.0,
             0.0,
             float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
             rejected,
             reason,
             accept_reason,
@@ -835,8 +856,24 @@ def score_candidate(
     b_pen_left = _b_penalty(left_stats, cfg)
     b_pen_right = _b_penalty(right_stats, cfg)
 
-    score = base + cfg.join_penalty * (raw_gap**2) + cfg.slope_penalty * (slope_gap**2)
-    score += cfg.shape_penalty_mono * violations + time_pen + b_pen_left + b_pen_right
+    gap_pen_component = cfg.join_penalty * (raw_gap**2) if math.isfinite(raw_gap) else float("nan")
+    slope_pen_component = (
+        cfg.slope_penalty * (slope_gap**2) if math.isfinite(slope_gap) else float("nan")
+    )
+    mono_pen_component = cfg.shape_penalty_mono * violations
+    score_components = {
+        "base": base,
+        "gap_pen": gap_pen_component,
+        "slope_pen": slope_pen_component,
+        "time_pen": time_pen,
+        "mono_pen": mono_pen_component,
+        "b_pen_left": b_pen_left,
+        "b_pen_right": b_pen_right,
+        "raw_gap": raw_gap,
+    }
+
+    score = base + gap_pen_component + slope_pen_component
+    score += mono_pen_component + time_pen + b_pen_left + b_pen_right
 
     if not rejected and not math.isfinite(score):
         rejected = True
@@ -856,16 +893,7 @@ def score_candidate(
             score,
             time_pen,
             level_shift,
-            {
-                "base": base,
-                "gap_pen": cfg.join_penalty * (raw_gap**2),
-                "slope_pen": cfg.slope_penalty * (slope_gap**2),
-                "time_pen": time_pen,
-                "mono_pen": cfg.shape_penalty_mono * violations,
-                "b_pen_left": b_pen_left,
-                "b_pen_right": b_pen_right,
-                "raw_gap": raw_gap,
-            },
+            score_components,
             left_stats,
             right_stats,
             delta_aicc,
@@ -911,6 +939,13 @@ def score_candidate(
         level_shift,
         b_pen_left,
         b_pen_right,
+        score_components["base"],
+        score_components["gap_pen"],
+        score_components["slope_pen"],
+        score_components["mono_pen"],
+        score_components["time_pen"],
+        score_components["b_pen_left"],
+        score_components["b_pen_right"],
         score,
         rejected,
         reason,
@@ -1181,6 +1216,13 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "level_shift_applied",
         "b_pen_left",
         "b_pen_right",
+        "base_aicc_sum",
+        "gap_pen",
+        "slope_pen",
+        "mono_pen",
+        "time_pen_comp",
+        "b_pen_left_comp",
+        "b_pen_right_comp",
         "penalized_score",
         "rejected_flag",
         "reject_reason",
