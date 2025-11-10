@@ -1935,9 +1935,10 @@ def create_plots(
     plt.close(fig)
     plots["monotonic"] = str(path_mono)
 
-    split_nodes = [node for node in gather_nodes(root) if node.split is not None]
-    for node in split_nodes:
+    for node in gather_nodes(root):
         split = node.split
+        if split is None:
+            continue
         split_idx = split.split_index
         left_idx = max(node.start, split_idx - 5)
         right_idx = min(node.end, split_idx + 6)
