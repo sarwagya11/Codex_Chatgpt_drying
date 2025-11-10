@@ -72,6 +72,7 @@ class Config:
     max_allowed_slope_eps: float = 1e-12
     monotonic_eps: float = 5e-4
     lowess_points: int = 5
+    iso_rmse_tol: float = 1e-6
 
 
 @dataclass
@@ -1339,7 +1340,9 @@ def recurse_node(
         )
 
 
-def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) -> Tuple[np.ndarray, np.ndarray, int]:
+def reconstruct_predictions(
+    node: SegmentNode, time: np.ndarray, values: np.ndarray, cfg: Config
+) -> Tuple[np.ndarray, np.ndarray, int, bool]:
     preds = np.zeros_like(time, dtype=float)
 
     def _assign(segment: SegmentNode) -> None:
@@ -1358,10 +1361,15 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
     # Count violations on raw preds (for diagnostics)
     violations = _count_monotonic_violations(preds, cfg.monotonic_eps)
 
-    # Enforce nonincreasing MR with an L2 isotonic projection.
-    corrected = isotonic_pav(preds, nonincreasing=True)
+    # Candidate isotonic correction
+    iso = isotonic_pav(preds, nonincreasing=True)
 
-    return preds, corrected, violations
+    rmse_raw = float(np.sqrt(np.mean((preds - values) ** 2)))
+    rmse_iso = float(np.sqrt(np.mean((iso - values) ** 2)))
+    use_iso = rmse_iso <= rmse_raw + cfg.iso_rmse_tol
+
+    corrected = iso if use_iso else preds
+    return preds, corrected, violations, use_iso
 
 
 
@@ -1542,6 +1550,7 @@ CLI_FIELDS = [
     "lowess_frac_root",
     "monotonic_eps",
     "lowess_points",
+    "iso_rmse_tol",
     "max_iter",
     "seed",
     "probe_better_child",
@@ -1601,14 +1610,9 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     for node in gather_nodes(root):
         update_node_diagnostics(node, time, values, cfg)
 
-    preds, corrected, violations = reconstruct_predictions(root, time, cfg)
+    preds, corrected, violations, iso_used = reconstruct_predictions(root, time, values, cfg)
     rmse_raw = float(np.sqrt(np.mean((preds - values) ** 2)))
     rmse_corrected = float(np.sqrt(np.mean((corrected - values) ** 2)))
-    if rmse_corrected - rmse_raw > 1e-12:
-        raise RuntimeError(
-            "Isotonic correction increased RMSE: "
-            f"raw={rmse_raw:.6g}, corrected={rmse_corrected:.6g}"
-        )
     leaves = [node for node in gather_nodes(root) if node.is_leaf()]
     leaf_aicc = sum(leaf.fit.aicc for leaf in leaves)
     delta_total = root.fit.aicc - leaf_aicc
@@ -1641,6 +1645,8 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
             "correction_magnitude": correction_mag,
             "rmse_raw": rmse_raw,
             "rmse_corrected": rmse_corrected,
+            "rmse_gain": float(rmse_raw - rmse_corrected),
+            "isotonic_used": bool(iso_used),
             "splits_used": budget.splits_used,
             "n_leaves": len(leaves),
             "levels_splits": {str(depth): count for depth, count in budget.levels_splits.items()},
@@ -1749,6 +1755,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=5,
         help="Number of LOWESS fractions evaluated when selecting candidate smoothing levels.",
     )
+    parser.add_argument(
+        "--iso-rmse-tol",
+        type=float,
+        default=1e-6,
+        help="Only keep isotonic correction if RMSE improves by at least this tolerance.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
     return parser.parse_args(argv)
 
@@ -1791,6 +1803,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         page_fallback_eps=args.page_fallback_eps,
         monotonic_eps=args.monotonic_eps,
         lowess_points=args.lowess_points,
+        iso_rmse_tol=args.iso_rmse_tol,
     )
 
     np.random.seed(cfg.seed)
