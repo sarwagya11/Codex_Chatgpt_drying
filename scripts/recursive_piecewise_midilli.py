@@ -227,6 +227,13 @@ class CandidateRecord:
     level_shift_applied: float
     b_pen_left: float
     b_pen_right: float
+    base_aicc_sum: float
+    gap_pen: float
+    slope_pen: float
+    mono_pen: float
+    time_pen_comp: float
+    b_pen_left_comp: float
+    b_pen_right_comp: float
     penalized_score: float
     rejected_flag: bool
     reject_reason: str
@@ -264,6 +271,13 @@ class CandidateRecord:
             "level_shift_applied": self.level_shift_applied,
             "b_pen_left": self.b_pen_left,
             "b_pen_right": self.b_pen_right,
+            "base_aicc_sum": self.base_aicc_sum,
+            "gap_pen": self.gap_pen,
+            "slope_pen": self.slope_pen,
+            "mono_pen": self.mono_pen,
+            "time_pen_comp": self.time_pen_comp,
+            "b_pen_left_comp": self.b_pen_left_comp,
+            "b_pen_right_comp": self.b_pen_right_comp,
             "penalized_score": self.penalized_score,
             "rejected_flag": self.rejected_flag,
             "reject_reason": self.reject_reason,
@@ -274,16 +288,14 @@ class CandidateRecord:
 
 class FitCache:
     def __init__(self) -> None:
-        self._cache: Dict[Tuple[str, int, int], FitStats] = {}
+        self._cache: Dict[Tuple[str, int, int, str], FitStats] = {}
 
-    def get(self, family: str, start: int, end: int) -> Optional[FitStats]:
-        return self._cache.get((family, start, end))
+    def get(self, family: str, start: int, end: int, tag: str) -> Optional[FitStats]:
+        return self._cache.get((family, start, end, tag))
 
-    def put(self, family: str, start: int, end: int, stats: FitStats) -> None:
-        self._cache[(family, start, end)] = stats
-
-    def store(self, family: str, start: int, end: int, tag: str, stats: FitStats) -> None:
+    def put(self, family: str, start: int, end: int, tag: str, stats: FitStats) -> None:
         self._cache[(family, start, end, tag)] = stats
+
 
 @dataclass
 class BudgetState:
@@ -482,7 +494,28 @@ def fit_segment(
     max_iter: int,
     bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Optional[FitStats]:
-    cached = cache.get(family, start, end)
+    if family == "Page":
+        tag = "page"
+    elif family == "Midilli":
+        if bounds is None or bounds is MIDILLI_BOUNDS_BODY:
+            tag = "mid_body"
+        elif bounds is MIDILLI_BOUNDS_TAIL:
+            tag = "mid_tail"
+        else:
+            if bounds is not None and all(
+                np.array_equal(b, c) for b, c in zip(bounds, MIDILLI_BOUNDS_BODY)
+            ):
+                tag = "mid_body"
+            elif bounds is not None and all(
+                np.array_equal(b, c) for b, c in zip(bounds, MIDILLI_BOUNDS_TAIL)
+            ):
+                tag = "mid_tail"
+            else:
+                raise ValueError("Unrecognized bounds for Midilli fit cache tag")
+    else:
+        raise ValueError(f"Unsupported family '{family}'")
+
+    cached = cache.get(family, start, end, tag)
     if cached is not None:
         return cached
 
@@ -494,7 +527,7 @@ def fit_segment(
         use_bounds = bounds if bounds is not None else MIDILLI_BOUNDS_BODY
         stats = _fit_midilli(segment_time, segment_values, max_iter, use_bounds)
     if stats is not None:
-        cache.put(family, start, end, stats)
+        cache.put(family, start, end, tag, stats)
     return stats
 
 
@@ -708,7 +741,6 @@ def _time_penalty(split_time: float, node: SegmentNode, time: np.ndarray, cfg: C
     x = (split_time - t_mid) / scale
     return cfg.time_penalty * (x**2)
 
-
 def _b_penalty(fit: FitStats, cfg: Config) -> float:
     if fit.family != "Midilli" or cfg.lambda_b <= 0:
         return 0.0
@@ -716,7 +748,6 @@ def _b_penalty(fit: FitStats, cfg: Config) -> float:
     if excess <= 0:
         return 0.0
     return cfg.lambda_b * (excess**2)
-
 
 def score_candidate(
     node: SegmentNode,
@@ -779,6 +810,13 @@ def score_candidate(
             0.0,
             0.0,
             float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
+            float("nan"),
             rejected,
             reason,
             accept_reason,
@@ -837,8 +875,12 @@ def score_candidate(
     b_pen_left = _b_penalty(left_stats, cfg)
     b_pen_right = _b_penalty(right_stats, cfg)
 
-    score = base + cfg.join_penalty * (raw_gap**2) + cfg.slope_penalty * (slope_gap**2)
-    score += cfg.shape_penalty_mono * violations + time_pen + b_pen_left + b_pen_right
+    gap_pen_component = cfg.join_penalty * (raw_gap**2)
+    slope_pen_component = cfg.slope_penalty * (slope_gap**2)
+    mono_pen_component = cfg.shape_penalty_mono * violations
+
+    score = base + gap_pen_component + slope_pen_component
+    score += mono_pen_component + time_pen + b_pen_left + b_pen_right
 
     if not rejected and not math.isfinite(score):
         rejected = True
@@ -860,10 +902,10 @@ def score_candidate(
             level_shift,
             {
                 "base": base,
-                "gap_pen": cfg.join_penalty * (raw_gap**2),
-                "slope_pen": cfg.slope_penalty * (slope_gap**2),
+                "gap_pen": gap_pen_component,
+                "slope_pen": slope_pen_component,
                 "time_pen": time_pen,
-                "mono_pen": cfg.shape_penalty_mono * violations,
+                "mono_pen": mono_pen_component,
                 "b_pen_left": b_pen_left,
                 "b_pen_right": b_pen_right,
                 "raw_gap": raw_gap,
@@ -913,6 +955,13 @@ def score_candidate(
         level_shift,
         b_pen_left,
         b_pen_right,
+        base,
+        gap_pen_component,
+        slope_pen_component,
+        mono_pen_component,
+        time_pen,
+        b_pen_left,
+        b_pen_right,
         score,
         rejected,
         reason,
@@ -941,6 +990,24 @@ def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
     p_value = math.erfc(abs(z) / math.sqrt(2))
     return float(p_value), float(z)
 
+def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
+    signs = np.sign(residuals)
+    signs = signs[signs != 0]
+    n = signs.size
+    if n < 2:
+        return float("nan"), float("nan")
+    n_pos = int(np.sum(signs > 0))
+    n_neg = int(np.sum(signs < 0))
+    if n_pos == 0 or n_neg == 0:
+        return 0.0, float("inf")
+    runs = 1 + int(np.sum(signs[:-1] != signs[1:]))
+    expected = (2 * n_pos * n_neg) / n + 1
+    variance = (2 * n_pos * n_neg * (2 * n_pos * n_neg - n_pos - n_neg)) / (n**2 * (n - 1))
+    if variance <= 0:
+        return float("nan"), float("nan")
+    z = (runs - expected) / math.sqrt(variance)
+    p_value = math.erfc(abs(z) / math.sqrt(2))
+    return float(p_value), float(z)
 
 def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
     if residuals.size < 2:
@@ -948,6 +1015,11 @@ def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: fl
     smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
     return float(np.nanmax(smoothed) - np.nanmin(smoothed))
 
+def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
+    if residuals.size < 2:
+        return 0.0
+    smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
+    return float(np.nanmax(smoothed) - np.nanmin(smoothed))
 
 def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
     if residuals.size < 3:
@@ -960,6 +1032,16 @@ def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> f
         return 0.0
     return float(np.nanmax(np.abs(second_diff)))
 
+def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
+    if residuals.size < 3:
+        return 0.0
+    smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
+    if smoothed.size < 3:
+        return 0.0
+    second_diff = np.diff(smoothed, n=2)
+    if second_diff.size == 0:
+        return 0.0
+    return float(np.nanmax(np.abs(second_diff)))
 
 def _slope_sign_changes(residuals: np.ndarray) -> int:
     if residuals.size < 3:
@@ -1138,9 +1220,11 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
     violations = _count_monotonic_violations(preds, cfg.monotonic_eps)
     corrected = preds.copy()
     for idx in range(1, corrected.size):
-        if corrected[idx] > corrected[idx - 1]:
-            diff = corrected[idx] - corrected[idx - 1]
-            corrected[idx] = corrected[idx - 1] - cfg.alpha_iso * diff
+        if corrected[idx] > corrected[idx - 1] + cfg.monotonic_eps:
+            corrected[idx] = corrected[idx - 1]
+    for idx in range(corrected.size - 2, -1, -1):
+        if corrected[idx] < corrected[idx + 1] - cfg.monotonic_eps:
+            corrected[idx] = corrected[idx + 1]
     return preds, corrected, violations
 
 
@@ -1183,6 +1267,13 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "level_shift_applied",
         "b_pen_left",
         "b_pen_right",
+        "base_aicc_sum",
+        "gap_pen",
+        "slope_pen",
+        "mono_pen",
+        "time_pen_comp",
+        "b_pen_left_comp",
+        "b_pen_right_comp",
         "penalized_score",
         "rejected_flag",
         "reject_reason",
@@ -1314,6 +1405,11 @@ CLI_FIELDS = [
     "probe_better_child",
     "lambda_b",
     "page_fallback_eps",
+    "max_allowed_gap_eps",
+    "max_allowed_slope_eps",
+    "monotonic_eps",
+    "alpha_iso",
+    "lowess_points",
     "log_level",
 ]
 
@@ -1472,6 +1568,28 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=2.0,
         help="AICc tolerance for preferring Page when Midilli hits parameter bounds.",
     )
+    parser.add_argument(
+        "--max-allowed-gap-eps", type=float, default=1e-12, help="Numeric tolerance for gap limit checks."
+    )
+ 
+    parser.add_argument(
+        "--max-allowed-slope-eps", type=float, default=1e-12, help="Numeric tolerance for slope limit checks."
+    )
+    parser.add_argument(
+        "--monotonic-eps", type=float, default=5e-6, help="Epsilon used when counting monotonicity violations."
+    )
+    parser.add_argument(
+        "--alpha-iso",
+        type=float,
+        default=1e-3,
+        help="Step size for optional isotonic-style smoothing of reconstructed predictions.",
+    )
+    parser.add_argument(
+        "--lowess-points",
+        type=int,
+        default=5,
+        help="Number of LOWESS fractions evaluated between min and max when generating candidates.",
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
     return parser.parse_args(argv)
 
@@ -1510,6 +1628,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         probe_better_child=bool(args.probe_better_child),
         lambda_b=args.lambda_b,
         page_fallback_eps=args.page_fallback_eps,
+        max_allowed_gap_eps=args.max_allowed_gap_eps,
+        max_allowed_slope_eps=args.max_allowed_slope_eps,
+        monotonic_eps=args.monotonic_eps,
+        alpha_iso=args.alpha_iso,
+        lowess_points=args.lowess_points,
     )
 
     np.random.seed(cfg.seed)
