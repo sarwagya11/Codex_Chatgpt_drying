@@ -741,7 +741,6 @@ def _time_penalty(split_time: float, node: SegmentNode, time: np.ndarray, cfg: C
     x = (split_time - t_mid) / scale
     return cfg.time_penalty * (x**2)
 
-
 def _b_penalty(fit: FitStats, cfg: Config) -> float:
     if fit.family != "Midilli" or cfg.lambda_b <= 0:
         return 0.0
@@ -749,7 +748,6 @@ def _b_penalty(fit: FitStats, cfg: Config) -> float:
     if excess <= 0:
         return 0.0
     return cfg.lambda_b * (excess**2)
-
 
 def score_candidate(
     node: SegmentNode,
@@ -992,6 +990,24 @@ def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
     p_value = math.erfc(abs(z) / math.sqrt(2))
     return float(p_value), float(z)
 
+def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
+    signs = np.sign(residuals)
+    signs = signs[signs != 0]
+    n = signs.size
+    if n < 2:
+        return float("nan"), float("nan")
+    n_pos = int(np.sum(signs > 0))
+    n_neg = int(np.sum(signs < 0))
+    if n_pos == 0 or n_neg == 0:
+        return 0.0, float("inf")
+    runs = 1 + int(np.sum(signs[:-1] != signs[1:]))
+    expected = (2 * n_pos * n_neg) / n + 1
+    variance = (2 * n_pos * n_neg * (2 * n_pos * n_neg - n_pos - n_neg)) / (n**2 * (n - 1))
+    if variance <= 0:
+        return float("nan"), float("nan")
+    z = (runs - expected) / math.sqrt(variance)
+    p_value = math.erfc(abs(z) / math.sqrt(2))
+    return float(p_value), float(z)
 
 def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
     if residuals.size < 2:
@@ -999,6 +1015,11 @@ def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: fl
     smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
     return float(np.nanmax(smoothed) - np.nanmin(smoothed))
 
+def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
+    if residuals.size < 2:
+        return 0.0
+    smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
+    return float(np.nanmax(smoothed) - np.nanmin(smoothed))
 
 def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
     if residuals.size < 3:
@@ -1011,6 +1032,16 @@ def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> f
         return 0.0
     return float(np.nanmax(np.abs(second_diff)))
 
+def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
+    if residuals.size < 3:
+        return 0.0
+    smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
+    if smoothed.size < 3:
+        return 0.0
+    second_diff = np.diff(smoothed, n=2)
+    if second_diff.size == 0:
+        return 0.0
+    return float(np.nanmax(np.abs(second_diff)))
 
 def _slope_sign_changes(residuals: np.ndarray) -> int:
     if residuals.size < 3:
@@ -1479,11 +1510,12 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    # Leave duplicate argument definitions as hard errors to expose configuration issues.
     parser = argparse.ArgumentParser(
-        description="Recursive piecewise Page/Midilli splitter with continuity and monotonicity controls.",
+        description="Recursive piecewise Page/Midilli splitter with continuity and monotonicity controls."
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
-    parser.add_argument("--outdir", default="outputs", help="Directory to store outputs.")
+    parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
     parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
@@ -1539,6 +1571,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-allowed-gap-eps", type=float, default=1e-12, help="Numeric tolerance for gap limit checks."
     )
+ 
     parser.add_argument(
         "--max-allowed-slope-eps", type=float, default=1e-12, help="Numeric tolerance for slope limit checks."
     )
