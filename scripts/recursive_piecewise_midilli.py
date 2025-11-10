@@ -12,7 +12,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -312,9 +312,30 @@ def midilli_derivative(time: np.ndarray, k: float, n: float, b: float) -> np.nda
     return page_derivative(time, k, n) + b
 
 
-PAGE_BOUNDS = (np.array([1e-8, 0.6]), np.array([3e-1, 2.20]))
-MIDILLI_BOUNDS = (np.array([1e-8, 0.1, -5e-3]), np.array([10.0, 3.0, 0]))
+PAGE_BOUNDS = (np.array([1e-8, 0.10]), np.array([1.0, 3.00]))
+
+MIDILLI_BOUNDS_BODY = (np.array([1e-8, 0.60, -2e-3]), np.array([2e-1, 2.20, 0.0]))
+MIDILLI_BOUNDS_TAIL = (np.array([1e-8, 0.80, -1e-4]), np.array([5e-2, 2.20, 0.0]))
+
+# Keep, but this now works in tandem with MIDILLI_BOUNDS_* and the b-penalty
 MIDILLI_SOFT_BOUND = 1e-3
+
+# === Segment classifiers ===
+TAIL_FRAC = 0.25          # rightmost fraction of timeline qualifies as tail
+TAIL_MR_MAX = 0.15        # or MR small enough to be considered tail
+HEAD_FRAC = 0.35          # early zone where Page is preferred but not forced
+
+
+def _is_tail(start: int, end: int, time: np.ndarray, values: np.ndarray) -> bool:
+    t_end = float(time[end - 1])
+    t_max = float(time[-1])
+    return (t_end >= (1.0 - TAIL_FRAC) * t_max) or (float(values[end - 1]) <= TAIL_MR_MAX)
+
+
+def _is_head(start: int, end: int, time: np.ndarray) -> bool:
+    t_end = float(time[end - 1])
+    t_max = float(time[-1])
+    return t_end <= HEAD_FRAC * t_max
 SCHEMA_VERSION = "2.0.0"
 
 
@@ -334,17 +355,22 @@ def _initial_guess_page(time: np.ndarray, values: np.ndarray) -> Tuple[float, fl
     return 0.05, 1.0
 
 
-def _initial_guess_midilli(time: np.ndarray, values: np.ndarray) -> Tuple[float, float, float]:
+def _initial_guess_midilli(
+    time: np.ndarray, values: np.ndarray, bounds: Tuple[np.ndarray, np.ndarray]
+) -> Tuple[float, float, float]:
     k_guess, n_guess = _initial_guess_page(time, values)
     if time.size >= 3:
         tail = min(5, time.size)
         coef = np.polyfit(time[-tail:], values[-tail:], deg=1)
-        b_guess = float(np.clip(coef[0], MIDILLI_BOUNDS[0][2], MIDILLI_BOUNDS[1][2]))
+        b_guess = float(np.clip(coef[0], bounds[0][2], bounds[1][2]))
     else:
         b_guess = 0.0
+    k_guess = float(np.clip(k_guess, bounds[0][0], bounds[1][0]))
+    n_guess = float(np.clip(n_guess, bounds[0][1], bounds[1][1]))
     return k_guess, n_guess, b_guess
 
 
+# Note: AICc computed from MSE=RSS/n (constant-variance Gaussian), used only for relative comparisons across candidates.
 def _compute_aicc(n_obs: int, rss: float, k_params: int) -> float:
     if n_obs <= k_params + 1:
         return float("inf")
@@ -399,8 +425,13 @@ def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[F
     )
 
 
-def _fit_midilli(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[FitStats]:
-    guess = _initial_guess_midilli(time, values)
+def _fit_midilli(
+    time: np.ndarray,
+    values: np.ndarray,
+    max_iter: int,
+    bounds: Tuple[np.ndarray, np.ndarray],
+) -> Optional[FitStats]:
+    guess = _initial_guess_midilli(time, values, bounds)
 
     try:
         params, _ = curve_fit(
@@ -408,12 +439,12 @@ def _fit_midilli(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optiona
             time,
             values,
             p0=guess,
-            bounds=MIDILLI_BOUNDS,
+            bounds=bounds,
             maxfev=max_iter,
         )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
-    params = np.clip(params, MIDILLI_BOUNDS[0], MIDILLI_BOUNDS[1])
+    params = np.clip(params, bounds[0], bounds[1])
     k = float(params[0])
     n = float(params[1])
     b = float(params[2])
@@ -423,15 +454,9 @@ def _fit_midilli(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optiona
     rmse = math.sqrt(max(rss, 0.0) / time.size)
     aicc = _compute_aicc(time.size, rss, 3)
     hit_bounds = {
-        "k": bool(
-            abs(k - MIDILLI_BOUNDS[0][0]) <= 1e-8 or abs(k - MIDILLI_BOUNDS[1][0]) <= 1e-8
-        ),
-        "n": bool(
-            abs(n - MIDILLI_BOUNDS[0][1]) <= 1e-8 or abs(n - MIDILLI_BOUNDS[1][1]) <= 1e-8
-        ),
-        "b": bool(
-            abs(b - MIDILLI_BOUNDS[0][2]) <= 1e-8 or abs(b - MIDILLI_BOUNDS[1][2]) <= 1e-8
-        ),
+        "k": bool(abs(k - bounds[0][0]) <= 1e-8 or abs(k - bounds[1][0]) <= 1e-8),
+        "n": bool(abs(n - bounds[0][1]) <= 1e-8 or abs(n - bounds[1][1]) <= 1e-8),
+        "b": bool(abs(b - bounds[0][2]) <= 1e-8 or abs(b - bounds[1][2]) <= 1e-8),
     }
     saturates = any(hit_bounds.values())
     return FitStats(
@@ -455,6 +480,7 @@ def fit_segment(
     values: np.ndarray,
     cache: FitCache,
     max_iter: int,
+    bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Optional[FitStats]:
     cached = cache.get(family, start, end)
     if cached is not None:
@@ -465,7 +491,8 @@ def fit_segment(
     if family == "Page":
         stats = _fit_page(segment_time, segment_values, max_iter)
     else:
-        stats = _fit_midilli(segment_time, segment_values, max_iter)
+        use_bounds = bounds if bounds is not None else MIDILLI_BOUNDS_BODY
+        stats = _fit_midilli(segment_time, segment_values, max_iter, use_bounds)
     if stats is not None:
         cache.put(family, start, end, stats)
     return stats
@@ -479,30 +506,46 @@ def select_best_model(
     cache: FitCache,
     cfg: Config,
 ) -> Optional[Tuple[FitStats, str]]:
-    midilli = fit_segment("Midilli", start, end, time, values, cache, cfg.max_iter)
-    fallback_trigger = False
-    if midilli is not None:
-        fallback_trigger = midilli.saturates_bound or midilli.hit_bounds.get("b", False)
-    need_page = cfg.allow_per_segment_model or fallback_trigger
-    page: Optional[FitStats] = None
-    if need_page:
-        page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
+    is_tail = _is_tail(start, end, time, values)
+    is_head = _is_head(start, end, time)
 
-    if midilli is None and page is None:
+    mid_bounds = MIDILLI_BOUNDS_TAIL if is_tail else MIDILLI_BOUNDS_BODY
+
+    page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
+    mid = fit_segment(
+        "Midilli",
+        start,
+        end,
+        time,
+        values,
+        cache,
+        cfg.max_iter,
+        bounds=mid_bounds,
+    )
+
+    if page is None and mid is None:
         return None
-    if midilli is None and page is not None:
-        return page, "page_only"
-    if page is None and midilli is not None:
-        return midilli, "midilli_only"
-    assert midilli is not None and page is not None
+    if page is None:
+        return (mid, "midilli_only")
+    if mid is None:
+        return (page, "page_only")
 
-    if fallback_trigger and page.aicc <= midilli.aicc + cfg.page_fallback_eps:
-        return page, "page_fallback"
+    if is_head and cfg.allow_per_segment_model:
+        if page.aicc <= mid.aicc + cfg.page_fallback_eps:
+            return (page, "page_head_preferred")
 
-    if cfg.allow_per_segment_model and page.aicc < midilli.aicc - 1e-9:
-        return page, "page"
+    if is_tail and cfg.allow_per_segment_model:
+        if mid.aicc <= page.aicc + cfg.page_fallback_eps:
+            return (mid, "midilli_tail_preferred")
 
-    return midilli, "midilli"
+    fallback_trigger = mid.saturates_bound or mid.hit_bounds.get("b", False)
+    if fallback_trigger and page.aicc <= mid.aicc + cfg.page_fallback_eps:
+        return (page, "page_fallback")
+
+    if cfg.allow_per_segment_model and page.aicc < mid.aicc - 1e-9:
+        return (page, "page")
+
+    return (mid, "midilli")
 
 
 def select_model_with_fallback(
@@ -1380,14 +1423,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
     parser.add_argument("--min-points-leaf", type=int, default=8, help="Minimum points required for child segments.")
     parser.add_argument("--candidate-grid-count", type=int, default=60, help="Uniform grid candidate count.")
-    parser.add_argument("--lowess-frac-min", type=float, default=0.12, help="Minimum LOWESS fraction for candidates.")
-    parser.add_argument("--lowess-frac-max", type=float, default=0.32, help="Maximum LOWESS fraction for candidates.")
-    parser.add_argument("--min-fraction", type=float, default=0.08, help="Minimum fractional position for splits.")
-    parser.add_argument("--max-fraction", type=float, default=0.92, help="Maximum fractional position for splits.")
+    parser.add_argument("--lowess-frac-min", type=float, default=0.10, help="Minimum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-max", type=float, default=0.30, help="Maximum LOWESS fraction for candidates.")
+    parser.add_argument("--min-fraction", type=float, default=0.05, help="Minimum fractional position for splits.")
+    parser.add_argument("--max-fraction", type=float, default=0.95, help="Maximum fractional position for splits.")
     parser.add_argument("--min-rel-improvement", type=float, default=0.02, help="Minimum relative AICc improvement required.")
     parser.add_argument(
         "--allow-per-segment-model",
-        action="store_true", 
+        action=argparse.BooleanOptionalAction,
         default=True,
         help="Evaluate Page vs Midilli per segment and choose the lower AICc.",
     )
@@ -1398,6 +1441,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-allowed-slope-gap", type=float, default=3e-4, help="Maximum allowed slope discontinuity."
     )
+    parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
+    parser.add_argument("--time-penalty", type=float, default=0.6, help="Penalty weight for split location prior.")
+    parser.add_argument("--lowess-frac-root", type=float, default=0.18, help="LOWESS fraction at the root node.")
+    parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
+    parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
     parser.add_argument(
         "--reject-nonmonotone",
         action=argparse.BooleanOptionalAction,
@@ -1405,8 +1453,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Reject splits that produce monotonicity violations.",
     )
     parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
-    parser.add_argument("--time-penalty", type=float, default=0.6, help="Penalty weight for split location prior.")
-    parser.add_argument("--lowess-frac-root", type=float, default=0.18, help="LOWESS fraction at the root node.")
+    parser.add_argument("--time-penalty", type=float, default=0.5, help="Penalty weight for split location prior.")
+    parser.add_argument("--lowess-frac-root", type=float, default=0.20, help="LOWESS fraction at the root node.")
     parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
     parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
     parser.add_argument(
