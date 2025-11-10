@@ -565,6 +565,11 @@ def select_best_model(
     is_head = _is_head(start, end, time)
 
     mid_bounds = MIDILLI_BOUNDS_TAIL if is_tail else MIDILLI_BOUNDS_BODY
+    if (not is_head) and (not is_tail):
+        lb, ub = MIDILLI_BOUNDS_BODY
+        ub_relaxed = ub.copy()
+        ub_relaxed[1] = 2.40
+        mid_bounds = (lb, ub_relaxed)
 
     page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
     mid = fit_segment(
@@ -760,17 +765,24 @@ def _combine_predictions(
 
 
 def _post_join_gap_after_adjustments(
-    left_value: float,
-    left_slope: float,
+    left_fit: FitStats,
     right_fit: FitStats,
-    right_time: float,
+    split_time: float,
+    first_right_time: float,
     right_time_shift: float,
 ) -> Tuple[float, float, float]:
-    adjusted_time = max(float(right_time + right_time_shift), 1e-8)
-    right_value, right_slope = _model_value_and_slope(right_fit, adjusted_time)
-    level_shift = left_value - right_value
-    post_join_gap = abs(left_value - (right_value + level_shift))
-    slope_gap = abs(left_slope - right_slope)
+    vL_split, sL_split = _model_value_and_slope(left_fit, split_time)
+    vR_at_split_after_shift, sR_split = _model_value_and_slope(
+        right_fit, max(split_time + right_time_shift, 1e-8)
+    )
+    level_shift = vL_split - vR_at_split_after_shift
+
+    vR_first_after_shift, _ = _model_value_and_slope(
+        right_fit, max(first_right_time + right_time_shift, 1e-8)
+    )
+    post_join_gap = abs(vL_split - (vR_first_after_shift + level_shift))
+
+    slope_gap = abs(sL_split - sR_split)
     return post_join_gap, slope_gap, level_shift
 
 
@@ -924,22 +936,14 @@ def score_candidate(
     denom = max(abs(node.fit.aicc), 1e-9)
     rel_impr = (node.fit.aicc - base) / denom
 
-    value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     right_time = float(time[split_idx + 1])
+    value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     value_right_raw, slope_right_raw = _model_value_and_slope(right_stats, right_time)
     raw_gap_pre_shift = abs(value_left - value_right_raw)
 
-    initial_slope_gap = abs(slope_left - slope_right_raw)
-    slope_tol = cfg.max_allowed_slope_gap + cfg.max_allowed_slope_eps
     max_shift = max(right_time - split_time, 0.0)
     right_time_shift_attempted = 0.0
-    if (
-        math.isfinite(slope_left)
-        and math.isfinite(slope_right_raw)
-        and initial_slope_gap <= slope_tol
-        and max_shift > 0.0
-        and initial_slope_gap > cfg.max_allowed_slope_eps
-    ):
+    if math.isfinite(slope_left) and math.isfinite(slope_right_raw) and max_shift > 0.0:
         shift = _solve_time_shift_for_slope_match(
             right_stats, right_time, slope_left, max_shift
         )
@@ -947,7 +951,7 @@ def score_candidate(
             right_time_shift_attempted = float(np.clip(shift, -max_shift, max_shift))
 
     post_join_gap_adj, slope_gap, level_shift = _post_join_gap_after_adjustments(
-        value_left, slope_left, right_stats, right_time, right_time_shift_attempted
+        left_stats, right_stats, split_time, right_time, right_time_shift_attempted
     )
     post_shift_gap = post_join_gap_adj
     time_pen = _time_penalty(split_time, node, time, cfg)
@@ -967,7 +971,7 @@ def score_candidate(
         rejected = True
         reason = "nan_metric"
         tests.append("nan_metric")
-    if raw_gap_pre_shift > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
+    if post_join_gap_adj > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_limit"
         tests.append("gap_limit")
@@ -983,7 +987,7 @@ def score_candidate(
         rejected = True
         reason = "rel_improvement"
         tests.append("rel_improvement")
-    if budget_sum_gaps + raw_gap_pre_shift > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
+    if budget_sum_gaps + post_join_gap_adj > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_budget"
         tests.append("gap_budget")
@@ -992,7 +996,7 @@ def score_candidate(
     b_pen_right = _b_penalty(right_stats, cfg)
 
     gap_pen_component = (
-        cfg.join_penalty * (raw_gap_pre_shift**2) if math.isfinite(raw_gap_pre_shift) else float("nan")
+        cfg.join_penalty * (post_join_gap_adj**2) if math.isfinite(post_join_gap_adj) else float("nan")
     )
     slope_pen_component = (
         cfg.slope_penalty * (slope_gap**2) if math.isfinite(slope_gap) else float("nan")
@@ -1737,8 +1741,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=4,
         help="Minimum spacing between consecutive candidate indices before feasibility checks.",
     )
-    parser.add_argument("--lowess-frac-min", type=float, default=0.8, help="Minimum LOWESS fraction for candidates.")
-    parser.add_argument("--lowess-frac-max", type=float, default=0.35, help="Maximum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-min", type=float, default=0.15, help="Minimum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-max", type=float, default=0.60, help="Maximum LOWESS fraction for candidates.")
     parser.add_argument("--min-fraction", type=float, default=0.05, help="Minimum fractional position for splits.")
     parser.add_argument("--max-fraction", type=float, default=0.95, help="Maximum fractional position for splits.")
     parser.add_argument("--min-rel-improvement", type=float, default=0.001, help="Minimum relative AICc improvement required.")
