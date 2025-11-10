@@ -10,9 +10,10 @@ import logging
 import math
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, cast
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -36,6 +37,23 @@ from kinetics import load_and_preprocess  # noqa: E402
 
 
 plt.switch_backend("Agg")
+
+
+_GLOBAL_RNG: Optional[np.random.Generator] = None
+
+
+@contextmanager
+def _scipy_random_state() -> Iterator[None]:
+    if _GLOBAL_RNG is None:
+        yield
+        return
+    state = np.random.get_state()
+    seed_value = int(_GLOBAL_RNG.integers(0, 2**32 - 1))
+    np.random.seed(seed_value)
+    try:
+        yield
+    finally:
+        np.random.set_state(state)
 
 
 @dataclass
@@ -80,6 +98,7 @@ class Config:
 class FitStats:
     family: str
     params: Dict[str, float]
+    initial_guess: Dict[str, float]
     rss: float
     rmse: float
     aicc: float
@@ -92,6 +111,7 @@ class FitStats:
         return {
             "family": self.family,
             "params": {key: float(value) for key, value in self.params.items()},
+            "initial_guess": {key: float(value) for key, value in self.initial_guess.items()},
             "AICc": float(self.aicc),
             "RMSE": float(self.rmse),
             "n_obs": int(self.n_obs),
@@ -223,12 +243,14 @@ class CandidateRecord:
     right_n: int
     model_left: str
     params_left: Dict[str, float]
+    guess_left: Dict[str, float]
     aicc_left: float
     rmse_left: float
     hit_bounds_left: Dict[str, bool]
     model_left_reason: str
     model_right: str
     params_right: Dict[str, float]
+    guess_right: Dict[str, float]
     aicc_right: float
     rmse_right: float
     hit_bounds_right: Dict[str, bool]
@@ -269,12 +291,14 @@ class CandidateRecord:
             "right_n": self.right_n,
             "model_left": self.model_left,
             "params_left_json": json.dumps(self.params_left, sort_keys=True),
+            "guess_left_json": json.dumps(self.guess_left, sort_keys=True),
             "AICc_left": self.aicc_left,
             "RMSE_left": self.rmse_left,
             "hit_bounds_left_json": json.dumps(self.hit_bounds_left, sort_keys=True),
             "model_left_reason": self.model_left_reason,
             "model_right": self.model_right,
             "params_right_json": json.dumps(self.params_right, sort_keys=True),
+            "guess_right_json": json.dumps(self.guess_right, sort_keys=True),
             "AICc_right": self.aicc_right,
             "RMSE_right": self.rmse_right,
             "hit_bounds_right_json": json.dumps(self.hit_bounds_right, sort_keys=True),
@@ -416,15 +440,17 @@ def _compute_aicc(n_obs: int, rss: float, k_params: int) -> float:
 
 def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[FitStats]:
     guess = _initial_guess_page(time, values)
+    guess_payload = {"k0": float(guess[0]), "n0": float(guess[1]), "b0": 0.0}
     try:
-        params, _ = curve_fit(
-            lambda t, k, n: page_model(t, k, n),
-            time,
-            values,
-            p0=guess,
-            bounds=PAGE_BOUNDS,
-            maxfev=max_iter,
-        )
+        with _scipy_random_state():
+            params, _ = curve_fit(
+                lambda t, k, n: page_model(t, k, n),
+                time,
+                values,
+                p0=guess,
+                bounds=PAGE_BOUNDS,
+                maxfev=max_iter,
+            )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
     params = np.clip(params, PAGE_BOUNDS[0], PAGE_BOUNDS[1])
@@ -454,6 +480,7 @@ def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[F
         saturates_bound=any(hit_bounds.values()),
         predictions=predictions,
         hit_bounds=hit_bounds,
+        initial_guess=guess_payload,
     )
 
 
@@ -464,16 +491,18 @@ def _fit_midilli(
     bounds: Tuple[np.ndarray, np.ndarray],
 ) -> Optional[FitStats]:
     guess = _initial_guess_midilli(time, values, bounds)
+    guess_payload = {"k0": float(guess[0]), "n0": float(guess[1]), "b0": float(guess[2])}
 
     try:
-        params, _ = curve_fit(
-            lambda t, k, n, b: midilli_model(t, k, n, b),
-            time,
-            values,
-            p0=guess,
-            bounds=bounds,
-            maxfev=max_iter,
-        )
+        with _scipy_random_state():
+            params, _ = curve_fit(
+                lambda t, k, n, b: midilli_model(t, k, n, b),
+                time,
+                values,
+                p0=guess,
+                bounds=bounds,
+                maxfev=max_iter,
+            )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
     params = np.clip(params, bounds[0], bounds[1])
@@ -501,6 +530,7 @@ def _fit_midilli(
         saturates_bound=saturates,
         predictions=predictions,
         hit_bounds=hit_bounds,
+        initial_guess=guess_payload,
     )
 
 
@@ -565,6 +595,11 @@ def select_best_model(
     is_head = _is_head(start, end, time)
 
     mid_bounds = MIDILLI_BOUNDS_TAIL if is_tail else MIDILLI_BOUNDS_BODY
+    if (not is_head) and (not is_tail):
+        lb, ub = MIDILLI_BOUNDS_BODY
+        ub_relaxed = ub.copy()
+        ub_relaxed[1] = 2.40
+        mid_bounds = (lb, ub_relaxed)
 
     page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
     mid = fit_segment(
@@ -760,17 +795,24 @@ def _combine_predictions(
 
 
 def _post_join_gap_after_adjustments(
-    left_value: float,
-    left_slope: float,
+    left_fit: FitStats,
     right_fit: FitStats,
-    right_time: float,
+    split_time: float,
+    first_right_time: float,
     right_time_shift: float,
 ) -> Tuple[float, float, float]:
-    adjusted_time = max(float(right_time + right_time_shift), 1e-8)
-    right_value, right_slope = _model_value_and_slope(right_fit, adjusted_time)
-    level_shift = left_value - right_value
-    post_join_gap = abs(left_value - (right_value + level_shift))
-    slope_gap = abs(left_slope - right_slope)
+    vL_split, sL_split = _model_value_and_slope(left_fit, split_time)
+    vR_at_split_after_shift, sR_split = _model_value_and_slope(
+        right_fit, max(split_time + right_time_shift, 1e-8)
+    )
+    level_shift = vL_split - vR_at_split_after_shift
+
+    vR_first_after_shift, _ = _model_value_and_slope(
+        right_fit, max(first_right_time + right_time_shift, 1e-8)
+    )
+    post_join_gap = abs(vL_split - (vR_first_after_shift + level_shift))
+
+    slope_gap = abs(sL_split - sR_split)
     return post_join_gap, slope_gap, level_shift
 
 
@@ -876,12 +918,14 @@ def score_candidate(
             right_n=right_n,
             model_left=left_stats.family if left_stats else "",
             params_left=left_stats.params if left_stats else {},
+            guess_left=left_stats.initial_guess if left_stats else {},
             aicc_left=left_stats.aicc if left_stats else float("nan"),
             rmse_left=left_stats.rmse if left_stats else float("nan"),
             hit_bounds_left=left_stats.hit_bounds if left_stats else {},
             model_left_reason=left_reason,
             model_right=right_stats.family if right_stats else "",
             params_right=right_stats.params if right_stats else {},
+            guess_right=right_stats.initial_guess if right_stats else {},
             aicc_right=right_stats.aicc if right_stats else float("nan"),
             rmse_right=right_stats.rmse if right_stats else float("nan"),
             hit_bounds_right=right_stats.hit_bounds if right_stats else {},
@@ -924,22 +968,14 @@ def score_candidate(
     denom = max(abs(node.fit.aicc), 1e-9)
     rel_impr = (node.fit.aicc - base) / denom
 
-    value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     right_time = float(time[split_idx + 1])
+    value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     value_right_raw, slope_right_raw = _model_value_and_slope(right_stats, right_time)
     raw_gap_pre_shift = abs(value_left - value_right_raw)
 
-    initial_slope_gap = abs(slope_left - slope_right_raw)
-    slope_tol = cfg.max_allowed_slope_gap + cfg.max_allowed_slope_eps
     max_shift = max(right_time - split_time, 0.0)
     right_time_shift_attempted = 0.0
-    if (
-        math.isfinite(slope_left)
-        and math.isfinite(slope_right_raw)
-        and initial_slope_gap <= slope_tol
-        and max_shift > 0.0
-        and initial_slope_gap > cfg.max_allowed_slope_eps
-    ):
+    if math.isfinite(slope_left) and math.isfinite(slope_right_raw) and max_shift > 0.0:
         shift = _solve_time_shift_for_slope_match(
             right_stats, right_time, slope_left, max_shift
         )
@@ -947,7 +983,7 @@ def score_candidate(
             right_time_shift_attempted = float(np.clip(shift, -max_shift, max_shift))
 
     post_join_gap_adj, slope_gap, level_shift = _post_join_gap_after_adjustments(
-        value_left, slope_left, right_stats, right_time, right_time_shift_attempted
+        left_stats, right_stats, split_time, right_time, right_time_shift_attempted
     )
     post_shift_gap = post_join_gap_adj
     time_pen = _time_penalty(split_time, node, time, cfg)
@@ -967,7 +1003,7 @@ def score_candidate(
         rejected = True
         reason = "nan_metric"
         tests.append("nan_metric")
-    if raw_gap_pre_shift > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
+    if post_join_gap_adj > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_limit"
         tests.append("gap_limit")
@@ -983,7 +1019,7 @@ def score_candidate(
         rejected = True
         reason = "rel_improvement"
         tests.append("rel_improvement")
-    if budget_sum_gaps + raw_gap_pre_shift > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
+    if budget_sum_gaps + post_join_gap_adj > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_budget"
         tests.append("gap_budget")
@@ -992,7 +1028,7 @@ def score_candidate(
     b_pen_right = _b_penalty(right_stats, cfg)
 
     gap_pen_component = (
-        cfg.join_penalty * (raw_gap_pre_shift**2) if math.isfinite(raw_gap_pre_shift) else float("nan")
+        cfg.join_penalty * (post_join_gap_adj**2) if math.isfinite(post_join_gap_adj) else float("nan")
     )
     slope_pen_component = (
         cfg.slope_penalty * (slope_gap**2) if math.isfinite(slope_gap) else float("nan")
@@ -1059,12 +1095,14 @@ def score_candidate(
         right_n=right_n,
         model_left=left_stats.family,
         params_left=left_stats.params,
+        guess_left=left_stats.initial_guess,
         aicc_left=left_stats.aicc,
         rmse_left=left_stats.rmse,
         hit_bounds_left=left_stats.hit_bounds,
         model_left_reason=left_reason,
         model_right=right_stats.family,
         params_right=right_stats.params,
+        guess_right=right_stats.initial_guess,
         aicc_right=right_stats.aicc,
         rmse_right=right_stats.rmse,
         hit_bounds_right=right_stats.hit_bounds,
@@ -1435,12 +1473,14 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "right_n",
         "model_left",
         "params_left_json",
+        "guess_left_json",
         "AICc_left",
         "RMSE_left",
         "hit_bounds_left_json",
         "model_left_reason",
         "model_right",
         "params_right_json",
+        "guess_right_json",
         "AICc_right",
         "RMSE_right",
         "hit_bounds_right_json",
@@ -1634,6 +1674,11 @@ def _get_version() -> Optional[str]:
 
 
 def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
+    global _GLOBAL_RNG
+    if _GLOBAL_RNG is None:
+        _GLOBAL_RNG = np.random.default_rng(cfg.seed)
+        np.random.seed(cfg.seed)
+
     logger = logging.getLogger(__name__)
     result = load_and_preprocess(path)
     time = result.time_min.astype(float)
@@ -1737,8 +1782,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=4,
         help="Minimum spacing between consecutive candidate indices before feasibility checks.",
     )
-    parser.add_argument("--lowess-frac-min", type=float, default=0.8, help="Minimum LOWESS fraction for candidates.")
-    parser.add_argument("--lowess-frac-max", type=float, default=0.35, help="Maximum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-min", type=float, default=0.15, help="Minimum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-max", type=float, default=0.60, help="Maximum LOWESS fraction for candidates.")
     parser.add_argument("--min-fraction", type=float, default=0.05, help="Minimum fractional position for splits.")
     parser.add_argument("--max-fraction", type=float, default=0.95, help="Maximum fractional position for splits.")
     parser.add_argument("--min-rel-improvement", type=float, default=0.001, help="Minimum relative AICc improvement required.")
@@ -1816,6 +1861,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Only keep isotonic correction if RMSE improves by at least this tolerance.",
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse arguments, emit the resolved configuration as JSON, and exit without processing data.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1861,7 +1911,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         iso_rmse_tol=args.iso_rmse_tol,
     )
 
+    global _GLOBAL_RNG
+    _GLOBAL_RNG = np.random.default_rng(cfg.seed)
     np.random.seed(cfg.seed)
+
+    if getattr(args, "dry_run", False):
+        print(json.dumps(_config_to_dict(cfg), indent=2))
+        return 0
 
     if not cfg.data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {cfg.data_dir}")
