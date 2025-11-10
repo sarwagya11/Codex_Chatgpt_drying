@@ -28,8 +28,8 @@ def make_config(**overrides) -> Config:
         outdir=ROOT,
         max_splits=2,
         max_depth=2,
-        min_points_root=12,
-        min_points_leaf=8,
+        min_points_root=30,
+        min_points_leaf=15,
         candidate_grid_count=overrides.get("candidate_grid_count", 60),
         lowess_frac_min=0.10,
         lowess_frac_max=0.30,
@@ -51,7 +51,7 @@ def make_config(**overrides) -> Config:
         log_level="INFO",
         probe_better_child=overrides.get("probe_better_child", True),
         lambda_b=overrides.get("lambda_b", 50.0),
-        page_fallback_eps=overrides.get("page_fallback_eps", 2.0),
+        page_fallback_eps=overrides.get("page_fallback_eps", 0.2),
     )
     params.update(overrides)
     return Config(**params)

@@ -44,7 +44,7 @@ class Config:
     outdir: Path
     max_splits: int
     max_depth: int
-    min_points_root: int
+    min_points_root: int  # Recommended to be at least twice min_points_leaf.
     min_points_leaf: int
     candidate_grid_count: int
     lowess_frac_min: float
@@ -1661,8 +1661,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
     parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
-    parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
-    parser.add_argument("--min-points-leaf", type=int, default=14, help="Minimum points required for child segments.")
+    parser.add_argument(
+        "--min-points-root",
+        type=int,
+        default=30,
+        help="Minimum points required at the root segment (must be at least twice the leaf requirement).",
+    )
+    parser.add_argument(
+        "--min-points-leaf",
+        type=int,
+        default=15,
+        help="Minimum points required for child segments; root defaults satisfy >= 2x this value.",
+    )
     parser.add_argument("--candidate-grid-count", type=int, default=400, help="Uniform grid candidate count.")
     parser.add_argument("--lowess-frac-min", type=float, default=0.10, help="Minimum LOWESS fraction for candidates.")
     parser.add_argument("--lowess-frac-max", type=float, default=0.30, help="Maximum LOWESS fraction for candidates.")
@@ -1702,7 +1712,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--reject-nonmonotone",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Reject splits that produce monotonicity violations.",
     )
     
@@ -1721,7 +1731,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--page-fallback-eps",
         type=float,
-        default=2.0,
+        default=0.2,
         help="AICc tolerance for preferring Page when Midilli hits parameter bounds.",
     )
     parser.add_argument(
