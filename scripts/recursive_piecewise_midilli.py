@@ -135,6 +135,7 @@ class SegmentNode:
     children: List["SegmentNode"] = field(default_factory=list)
     evidence: Optional[Evidence] = None
     offset: float = 0.0
+    right_time_shift_at_boundary: float = 0.0
     diagnostics: Dict[str, float] = field(default_factory=dict)
 
     def is_leaf(self) -> bool:
@@ -157,6 +158,8 @@ class SegmentNode:
             "right_slope": float(self.diagnostics.get("right_slope", 0.0)),
             "offset": float(self.offset),
         }
+        if abs(self.right_time_shift_at_boundary) > 0.0:
+            payload["right_time_shift_at_boundary"] = float(self.right_time_shift_at_boundary)
         if self.split is not None:
             payload.update(
                 {
@@ -642,7 +645,9 @@ def generate_candidates(
     grid_indices = {int(round(idx)) for idx in grid}
     grid_indices = {idx for idx in grid_indices if allowed_min <= idx <= allowed_max}
     segment_time = time[start:end]
-    base_pred = _segment_base_predictions(node.fit, segment_time)
+    base_pred = _segment_base_predictions(
+        node.fit, segment_time, node.right_time_shift_at_boundary
+    )
     if base_pred.size:
         base_pred = base_pred + node.offset
     residuals = values[start:end] - base_pred
@@ -697,11 +702,18 @@ def _model_value_and_slope(fit: FitStats, time_value: float) -> Tuple[float, flo
     return value, slope
 
 
-def _segment_base_predictions(fit: FitStats, segment_time: np.ndarray) -> np.ndarray:
+def _segment_base_predictions(
+    fit: FitStats, segment_time: np.ndarray, first_point_time_shift: float = 0.0
+) -> np.ndarray:
+    if first_point_time_shift != 0.0 and segment_time.size:
+        adjusted_time = np.array(segment_time, copy=True)
+        adjusted_time[0] = max(float(adjusted_time[0]) + first_point_time_shift, 0.0)
+    else:
+        adjusted_time = segment_time
     if fit.family == "Page":
-        return page_model(segment_time, fit.params["k"], fit.params["n"])
+        return page_model(adjusted_time, fit.params["k"], fit.params["n"])
     return midilli_model(
-        segment_time, fit.params["k"], fit.params["n"], fit.params.get("b", 0.0)
+        adjusted_time, fit.params["k"], fit.params["n"], fit.params.get("b", 0.0)
     )
 
 
@@ -1038,7 +1050,9 @@ def compute_child_evidence(
     parent_k = 2 if parent.fit.family == "Page" else 3
     residuals_parent = values[child_slice] - parent_base
 
-    child_base = _segment_base_predictions(child.fit, child_time)
+    child_base = _segment_base_predictions(
+        child.fit, child_time, child.right_time_shift_at_boundary
+    )
     if child_base.size:
         child_base = child_base + child.offset
     residuals_child = values[child_slice] - child_base
@@ -1082,9 +1096,77 @@ def _segment_boundary_slopes(fit: FitStats, segment_time: np.ndarray) -> Tuple[f
     return left_val, right_val
 
 
+def _segment_slope_at(fit: FitStats, time_value: float) -> float:
+    if fit.family == "Page":
+        return float(
+            page_derivative(np.array([time_value]), fit.params["k"], fit.params["n"])[0]
+        )
+    return float(
+        midilli_derivative(
+            np.array([time_value]),
+            fit.params["k"],
+            fit.params["n"],
+            fit.params.get("b", 0.0),
+        )[0]
+    )
+
+
+def _solve_time_shift_for_slope_match(
+    fit: FitStats, base_time: float, target_slope: float, max_shift: float
+) -> float:
+    base_time = float(max(base_time, 1e-8))
+    max_shift = float(max(max_shift, 0.0))
+    if max_shift <= 0.0:
+        return 0.0
+    initial_slope = _segment_slope_at(fit, base_time)
+    if not math.isfinite(initial_slope) or not math.isfinite(target_slope):
+        return 0.0
+    if abs(initial_slope - target_slope) <= 1e-12:
+        return 0.0
+    delta = 0.0
+    current_time = base_time
+    tol = 1e-8 + 1e-3 * abs(target_slope)
+    for _ in range(6):
+        slope_here = _segment_slope_at(fit, current_time)
+        if not math.isfinite(slope_here):
+            return 0.0
+        error = slope_here - target_slope
+        if abs(error) <= tol:
+            break
+        step_radius = min(max_shift, max(current_time * 0.5, 1e-6))
+        left_time = max(current_time - step_radius, 1e-8)
+        right_time = current_time + step_radius
+        slope_left = _segment_slope_at(fit, left_time)
+        slope_right = _segment_slope_at(fit, right_time)
+        denom = right_time - left_time
+        if denom <= 0:
+            break
+        slope_prime = (slope_right - slope_left) / denom
+        if not math.isfinite(slope_prime) or abs(slope_prime) < 1e-12:
+            break
+        step = error / slope_prime
+        delta -= step
+        delta = float(np.clip(delta, -max_shift, max_shift))
+        current_time = base_time + delta
+        if current_time <= 0.0:
+            current_time = max(1e-8, base_time - max_shift)
+            delta = current_time - base_time
+        if abs(step) <= tol:
+            break
+    final_time = base_time + delta
+    final_slope = _segment_slope_at(fit, final_time)
+    if not math.isfinite(final_slope):
+        return 0.0
+    if abs(final_slope - target_slope) >= abs(initial_slope - target_slope):
+        return 0.0
+    return delta
+
+
 def update_node_diagnostics(node: SegmentNode, time: np.ndarray, values: np.ndarray, cfg: Config) -> None:
     segment_time = time[node.start : node.end]
-    base_pred = _segment_base_predictions(node.fit, segment_time)
+    base_pred = _segment_base_predictions(
+        node.fit, segment_time, node.right_time_shift_at_boundary
+    )
     if base_pred.size:
         base_pred = base_pred + node.offset
     residuals = values[node.start : node.end] - base_pred
@@ -1127,21 +1209,44 @@ def recurse_node(
     if best_info is None:
         return
     node.split = best_info
+    right_time_shift = 0.0
+    split_idx = best_info.split_index
+    right_idx = split_idx + 1
+    if right_idx < node.end:
+        left_time = float(time[split_idx])
+        right_time = float(time[right_idx])
+        slope_left = _segment_slope_at(best_info.left, left_time)
+        slope_right = _segment_slope_at(best_info.right, right_time)
+        slope_gap = abs(slope_left - slope_right)
+        slope_tol = max(cfg.max_allowed_slope_gap, cfg.max_allowed_slope_eps)
+        if (
+            math.isfinite(slope_left)
+            and math.isfinite(slope_right)
+            and slope_gap <= slope_tol
+        ):
+            max_shift = max(right_time - left_time, 0.0)
+            if max_shift > 0.0 and slope_gap > cfg.max_allowed_slope_eps:
+                shift = _solve_time_shift_for_slope_match(
+                    best_info.right, right_time, slope_left, max_shift
+                )
+                if shift != 0.0:
+                    right_time_shift = shift
     left_node = SegmentNode(
         node_id=f"{node.node_id}L",
         start=node.start,
-        end=best_info.split_index + 1,
+        end=split_idx + 1,
         depth=node.depth + 1,
         fit=best_info.left,
         offset=node.offset,
     )
     right_node = SegmentNode(
         node_id=f"{node.node_id}R",
-        start=best_info.split_index + 1,
+        start=split_idx + 1,
         end=node.end,
         depth=node.depth + 1,
         fit=best_info.right,
         offset=node.offset + best_info.level_shift_applied,
+        right_time_shift_at_boundary=right_time_shift,
     )
     node.children = [left_node, right_node]
     budget.sum_gaps += best_info.raw_gap
@@ -1180,7 +1285,9 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
 
     def _assign(segment: SegmentNode) -> None:
         segment_time = time[segment.start:segment.end]
-        base = _segment_base_predictions(segment.fit, segment_time)
+        base = _segment_base_predictions(
+            segment.fit, segment_time, segment.right_time_shift_at_boundary
+        )
         if base.size:
             base = base + segment.offset
         preds[segment.start:segment.end] = base
