@@ -274,7 +274,7 @@ class CandidateRecord:
             "rel_impr": self.rel_improvement,
             "raw_gap_pre_shift": self.raw_gap_pre_shift,
             "post_shift_gap": self.post_shift_gap,
-            # Backward compatibility: emit legacy keys for one release.
+          
             "slope_gap": self.slope_gap,
             "violations": self.violations,
             "time_pen": self.time_pen,
@@ -947,8 +947,6 @@ def score_candidate(
         "b_pen_left": b_pen_left,
         "b_pen_right": b_pen_right,
         "raw_gap_pre_shift": raw_gap_pre_shift,
-        # Backward compatibility: emit legacy key for one release.
-        "raw_gap": raw_gap_pre_shift,
     }
 
     score = base + gap_pen_component + slope_pen_component
@@ -1398,7 +1396,7 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "rel_impr",
         "raw_gap_pre_shift",
         "post_shift_gap",
-        # Backward compatibility: emit legacy columns for one release.
+       
         "slope_gap",
         "violations",
         "time_pen",
