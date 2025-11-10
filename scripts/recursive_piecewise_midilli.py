@@ -1108,6 +1108,7 @@ def recurse_node(
     dataset_name: str,
     budget: BudgetState,
     candidate_records: List[CandidateRecord],
+    is_probe: bool = False,
 ) -> None:
     if node.depth >= cfg.max_depth:
         return
@@ -1167,12 +1168,26 @@ def recurse_node(
         ordered_children = sorted(node.children, key=_evidence_key, reverse=True)
     else:
         ordered_children = list(node.children)
-    for child in ordered_children:
+    if is_probe:
+        return
+
+    for idx, child in enumerate(ordered_children):
         if budget.splits_used >= cfg.max_splits:
             break
         if child.depth >= cfg.max_depth:
             continue
-        recurse_node(child, time, values, cache, cfg, dataset_name, budget, candidate_records)
+        child_probe = cfg.probe_better_child and idx > 0
+        recurse_node(
+            child,
+            time,
+            values,
+            cache,
+            cfg,
+            dataset_name,
+            budget,
+            candidate_records,
+            is_probe=child_probe,
+        )
 
 
 def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) -> Tuple[np.ndarray, np.ndarray, int]:
