@@ -728,6 +728,42 @@ def _count_monotonic_violations(predictions: np.ndarray, eps: float) -> int:
     return int(np.sum(diffs > eps))
 
 
+def isotonic_pav(y: np.ndarray, nonincreasing: bool = True) -> np.ndarray:
+    """Project ``y`` onto the space of monotone sequences via PAV."""
+
+    if y.ndim != 1:
+        raise ValueError("isotonic_pav expects a 1D array")
+    if y.size == 0:
+        return y.copy()
+
+    def _pav_non_decreasing(values: np.ndarray) -> np.ndarray:
+        block_values: List[float] = []
+        block_lengths: List[int] = []
+        for value in values:
+            block_values.append(float(value))
+            block_lengths.append(1)
+            while len(block_values) >= 2 and block_values[-2] > block_values[-1]:
+                total = block_lengths[-2] + block_lengths[-1]
+                merged = (
+                    block_values[-2] * block_lengths[-2]
+                    + block_values[-1] * block_lengths[-1]
+                ) / total
+                block_values[-2] = merged
+                block_lengths[-2] = total
+                block_values.pop()
+                block_lengths.pop()
+        result = np.empty(values.size, dtype=float)
+        idx = 0
+        for value, length in zip(block_values, block_lengths):
+            result[idx : idx + length] = value
+            idx += length
+        return result
+
+    if nonincreasing:
+        return -_pav_non_decreasing(-y.astype(float))
+    return _pav_non_decreasing(y.astype(float))
+
+
 def _time_penalty(split_time: float, node: SegmentNode, time: np.ndarray, cfg: Config) -> float:
     t_min = float(time[node.start])
     t_max = float(time[node.end - 1])
@@ -1192,16 +1228,8 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
     # Count violations on raw preds (for diagnostics)
     violations = _count_monotonic_violations(preds, cfg.monotonic_eps)
 
-    # Enforce nonincreasing MR by clamping, not nudging
-    corrected = preds.copy()
-    # forward: remove any local increase
-    for i in range(1, corrected.size):
-        if corrected[i] > corrected[i - 1] + cfg.monotonic_eps:
-            corrected[i] = corrected[i - 1]
-    # backward: clean up any residual rise left by forward pass
-    for i in range(corrected.size - 2, -1, -1):
-        if corrected[i] < corrected[i + 1] - cfg.monotonic_eps:
-            corrected[i] = corrected[i + 1]
+    # Enforce nonincreasing MR with an L2 isotonic projection.
+    corrected = isotonic_pav(preds, nonincreasing=True)
 
     return preds, corrected, violations
 
