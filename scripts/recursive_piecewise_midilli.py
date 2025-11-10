@@ -65,7 +65,6 @@ class Config:
     max_allowed_gap_eps: float = 1e-12
     max_allowed_slope_eps: float = 1e-12
     monotonic_eps: float = 5e-4
-    alpha_iso: float = 1e-3
     lowess_points: int = 5
 
 
@@ -1382,7 +1381,6 @@ CLI_FIELDS = [
     "time_penalty",
     "lowess_frac_root",
     "monotonic_eps",
-    "alpha_iso",
     "lowess_points",
     "max_iter",
     "seed",
@@ -1567,12 +1565,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Numerical tolerance used when checking for monotonicity violations.",
     )
     parser.add_argument(
-        "--alpha-iso",
-        type=float,
-        default=1e-3,
-        help="Step size for isotonic adjustment when enforcing monotonicity.",
-    )
-    parser.add_argument(
         "--lowess-points",
         type=int,
         default=5,
@@ -1619,7 +1611,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lambda_b=args.lambda_b,
         page_fallback_eps=args.page_fallback_eps,
         monotonic_eps=args.monotonic_eps,
-        alpha_iso=args.alpha_iso,
         lowess_points=args.lowess_points,
     )
 
