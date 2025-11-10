@@ -172,8 +172,6 @@ class SegmentNode:
                     "post_shift_gap": float(self.split.post_shift_gap),
                     "raw_gap_pre_shift": float(self.split.raw_gap_pre_shift),
                     # Backward compatibility: emit legacy keys for one release.
-                    "level_gap": float(self.split.post_shift_gap),
-                    "raw_gap": float(self.split.raw_gap_pre_shift),
                     "slope_gap": float(self.split.slope_gap),
                     "penalized_score": float(self.split.penalized_score),
                     "time_penalty": float(self.split.time_penalty),
@@ -277,8 +275,6 @@ class CandidateRecord:
             "raw_gap_pre_shift": self.raw_gap_pre_shift,
             "post_shift_gap": self.post_shift_gap,
             # Backward compatibility: emit legacy keys for one release.
-            "gap": self.raw_gap_pre_shift,
-            "level_gap": self.post_shift_gap,
             "slope_gap": self.slope_gap,
             "violations": self.violations,
             "time_pen": self.time_pen,
@@ -1403,8 +1399,6 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "raw_gap_pre_shift",
         "post_shift_gap",
         # Backward compatibility: emit legacy columns for one release.
-        "gap",
-        "level_gap",
         "slope_gap",
         "violations",
         "time_pen",
