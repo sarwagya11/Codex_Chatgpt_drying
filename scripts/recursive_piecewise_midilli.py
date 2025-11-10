@@ -310,7 +310,7 @@ def midilli_derivative(time: np.ndarray, k: float, n: float, b: float) -> np.nda
     return page_derivative(time, k, n) + b
 
 
-PAGE_BOUNDS = (np.array([1e-8, 0.60]), np.array([3e-1, 2.20]))
+PAGE_BOUNDS = (np.array([1e-8, 0.10]), np.array([1.0, 3.00]))
 
 MIDILLI_BOUNDS_BODY = (np.array([1e-8, 0.60, -2e-3]), np.array([2e-1, 2.20, 0.0]))
 MIDILLI_BOUNDS_TAIL = (np.array([1e-8, 0.80, -1e-4]), np.array([5e-2, 2.20, 0.0]))
@@ -477,6 +477,7 @@ def fit_segment(
     values: np.ndarray,
     cache: FitCache,
     max_iter: int,
+    bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Optional[FitStats]:
     cached = cache.get(family, start, end)
     if cached is not None:
@@ -487,7 +488,8 @@ def fit_segment(
     if family == "Page":
         stats = _fit_page(segment_time, segment_values, max_iter)
     else:
-        stats = _fit_midilli(segment_time, segment_values, max_iter, MIDILLI_BOUNDS_BODY)
+        use_bounds = bounds if bounds is not None else MIDILLI_BOUNDS_BODY
+        stats = _fit_midilli(segment_time, segment_values, max_iter, use_bounds)
     if stats is not None:
         cache.put(family, start, end, stats)
     return stats
@@ -501,43 +503,46 @@ def select_best_model(
     cache: FitCache,
     cfg: Config,
 ) -> Optional[Tuple[FitStats, str]]:
-    # Tail → Page only
-    if _is_tail(start, end, time, values):
-        page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
-        return (page, "page_tail_forced") if page is not None else None
+    is_tail = _is_tail(start, end, time, values)
+    is_head = _is_head(start, end, time)
 
-    # Head or Body → evaluate families per segment if allowed
-    page: Optional[FitStats] = None
-    mid: Optional[FitStats] = None
+    mid_bounds = MIDILLI_BOUNDS_TAIL if is_tail else MIDILLI_BOUNDS_BODY
+
     page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
-
-    # Choose Midilli bounds by zone (head/body use BODY bounds)
-    mid_bounds = MIDILLI_BOUNDS_BODY
-    mid = _fit_midilli(time[start:end], values[start:end], cfg.max_iter, mid_bounds)
-    if mid is not None:
-        cache.put("Midilli", start, end, mid)
+    mid = fit_segment(
+        "Midilli",
+        start,
+        end,
+        time,
+        values,
+        cache,
+        cfg.max_iter,
+        bounds=mid_bounds,
+    )
 
     if page is None and mid is None:
         return None
     if page is None:
-        return mid, "midilli_only"
+        return (mid, "midilli_only")
     if mid is None:
-        return page, "page_only"
+        return (page, "page_only")
 
-    # If head, give Page a slight tie-break preference
-    if _is_head(start, end, time) and cfg.allow_per_segment_model:
+    if is_head and cfg.allow_per_segment_model:
         if page.aicc <= mid.aicc + cfg.page_fallback_eps:
-            return page, "page_head_preferred"
+            return (page, "page_head_preferred")
 
-    # If Midilli hit bounds on b or exceeded soft bound, prefer Page within eps
+    if is_tail and cfg.allow_per_segment_model:
+        if mid.aicc <= page.aicc + cfg.page_fallback_eps:
+            return (mid, "midilli_tail_preferred")
+
     fallback_trigger = mid.saturates_bound or mid.hit_bounds.get("b", False)
     if fallback_trigger and page.aicc <= mid.aicc + cfg.page_fallback_eps:
-        return page, "page_fallback"
+        return (page, "page_fallback")
 
     if cfg.allow_per_segment_model and page.aicc < mid.aicc - 1e-9:
-        return page, "page"
+        return (page, "page")
 
-    return mid, "midilli"
+    return (mid, "midilli")
 
 
 def select_model_with_fallback(
@@ -1422,15 +1427,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--min-rel-improvement", type=float, default=0.02, help="Minimum relative AICc improvement required.")
     parser.add_argument(
         "--allow-per-segment-model",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Evaluate Page vs Midilli per segment and choose the lower AICc.",
     )
-    parser.add_argument("--join-penalty", type=float, default=10.0, help="Penalty on squared join gaps.")
-    parser.add_argument("--slope-penalty", type=float, default=2.0, help="Penalty on squared slope gaps.")
+    parser.add_argument("--join-penalty", type=float, default=200.0, help="Penalty on squared join gaps.")
+    parser.add_argument("--slope-penalty", type=float, default=8.0, help="Penalty on squared slope gaps.")
     parser.add_argument("--shape-penalty-mono", type=float, default=50.0, help="Penalty per monotonicity violation.")
-    parser.add_argument("--max-allowed-gap", type=float, default=0.02, help="Maximum allowed join gap.")
+    parser.add_argument("--max-allowed-gap", type=float, default=0.006, help="Maximum allowed join gap.")
     parser.add_argument(
-        "--max-allowed-slope-gap", type=float, default=5e-4, help="Maximum allowed slope discontinuity."
+        "--max-allowed-slope-gap", type=float, default=3e-4, help="Maximum allowed slope discontinuity."
     )
     parser.add_argument(
         "--reject-nonmonotone",
@@ -1438,7 +1444,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=True,
         help="Reject splits that produce monotonicity violations.",
     )
-    parser.add_argument("--total-gap-budget", type=float, default=0.05, help="Total allowed sum of join gaps.")
+    parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
     parser.add_argument("--time-penalty", type=float, default=0.5, help="Penalty weight for split location prior.")
     parser.add_argument("--lowess-frac-root", type=float, default=0.20, help="LOWESS fraction at the root node.")
     parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
@@ -1452,7 +1458,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--lambda-b",
         type=float,
-        default=50.0,
+        default=80.0,
         help="Penalty weight applied when |b| exceeds 1e-3 for Midilli segments.",
     )
     parser.add_argument(
