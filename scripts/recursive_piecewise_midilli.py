@@ -414,6 +414,18 @@ PAGE_BOUNDS = (np.array([1e-8, 0.10]), np.array([1.0, 3.00]))
 MIDILLI_BOUNDS_BODY = (np.array([1e-8, 0.60, -2e-3]), np.array([2e-1, 2.20, 0.0]))
 MIDILLI_BOUNDS_TAIL = (np.array([1e-8, 0.70, -6e-4]), np.array([6e-2, 2.30, 0.0]))
 
+
+def _bounds_equal(
+    candidate: Tuple[np.ndarray, np.ndarray],
+    reference: Tuple[np.ndarray, np.ndarray],
+    *,
+    atol: float = 1e-12,
+) -> bool:
+    return all(
+        np.allclose(np.asarray(lhs), np.asarray(rhs), atol=atol, rtol=0.0)
+        for lhs, rhs in zip(candidate, reference)
+    )
+
 # Keep, but this now works in tandem with MIDILLI_BOUNDS_* and the b-penalty
 DEFAULT_MIDILLI_SOFT_BOUND = 1e-3
 
@@ -597,26 +609,22 @@ def fit_segment(
     max_iter: int,
     bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Optional[FitStats]:
+    tag: str
+    use_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None
     if family == "Page":
         tag = "page"
     elif family == "Midilli":
-        if bounds is None or bounds is MIDILLI_BOUNDS_BODY:
+        use_bounds = bounds if bounds is not None else MIDILLI_BOUNDS_BODY
+        if _bounds_equal(use_bounds, MIDILLI_BOUNDS_BODY):
             tag = "mid_body"
-        elif bounds is MIDILLI_BOUNDS_TAIL:
+        elif _bounds_equal(use_bounds, MIDILLI_BOUNDS_TAIL):
             tag = "mid_tail"
         else:
-            if bounds is not None and all(
-                np.array_equal(b, candidate)
-                for b, candidate in zip(bounds, MIDILLI_BOUNDS_BODY)
-            ):
-                tag = "mid_body"
-            elif bounds is not None and all(
-                np.array_equal(b, candidate)
-                for b, candidate in zip(bounds, MIDILLI_BOUNDS_TAIL)
-            ):
-                tag = "mid_tail"
-            else:
-                raise ValueError("Unrecognized bounds for Midilli fit cache tag")
+            bounds_key = tuple(
+                tuple(float(val) for val in np.asarray(arr).flatten()) for arr in use_bounds
+            )
+            bounds_hash = hashlib.sha1(repr(bounds_key).encode("utf-8")).hexdigest()
+            tag = f"mid_custom_{bounds_hash}"
     else:
         raise ValueError(f"Unsupported family '{family}' for fit cache")
 
@@ -629,7 +637,7 @@ def fit_segment(
     if family == "Page":
         stats = _fit_page(segment_time, segment_values, max_iter)
     else:
-        use_bounds = bounds if bounds is not None else MIDILLI_BOUNDS_BODY
+        assert use_bounds is not None
         stats = _fit_midilli(segment_time, segment_values, max_iter, use_bounds)
     if stats is not None:
         cache.put(family, start, end, tag, stats)
