@@ -10,9 +10,11 @@ import logging
 import math
 import subprocess
 import sys
+import time as timemod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, cast
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -38,6 +40,23 @@ from kinetics import load_and_preprocess  # noqa: E402
 plt.switch_backend("Agg")
 
 
+_GLOBAL_RNG: Optional[np.random.Generator] = None
+
+
+@contextmanager
+def _scipy_random_state() -> Iterator[None]:
+    if _GLOBAL_RNG is None:
+        yield
+        return
+    state = np.random.get_state()
+    seed_value = int(_GLOBAL_RNG.integers(0, 2**32 - 1))
+    np.random.seed(seed_value)
+    try:
+        yield
+    finally:
+        np.random.set_state(state)
+
+
 @dataclass
 class Config:
     data_dir: Path
@@ -59,6 +78,7 @@ class Config:
     max_allowed_gap: float
     max_allowed_slope_gap: float
     reject_nonmonotone: bool
+    monotonic_hardcap: int
     total_gap_budget: float
     time_penalty: float
     lowess_frac_root: float
@@ -66,8 +86,13 @@ class Config:
     seed: int
     log_level: str
     probe_better_child: bool
+    probe_better_child_passes: int
     lambda_b: float
     page_fallback_eps: float
+    midbody_aicc_tolerance: float
+    midilli_b_softbound: float
+    export_leaves_csv: bool
+    no_plots: bool
     candidate_min_spacing: int = 4
     max_allowed_gap_eps: float = 1e-12
     max_allowed_slope_eps: float = 1e-12
@@ -80,6 +105,7 @@ class Config:
 class FitStats:
     family: str
     params: Dict[str, float]
+    initial_guess: Dict[str, float]
     rss: float
     rmse: float
     aicc: float
@@ -87,15 +113,18 @@ class FitStats:
     saturates_bound: bool
     predictions: np.ndarray
     hit_bounds: Dict[str, bool]
+    bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
     def to_summary(self) -> Dict[str, object]:
         return {
             "family": self.family,
             "params": {key: float(value) for key, value in self.params.items()},
+            "initial_guess": {key: float(value) for key, value in self.initial_guess.items()},
             "AICc": float(self.aicc),
             "RMSE": float(self.rmse),
             "n_obs": int(self.n_obs),
             "hit_bounds": {key: bool(value) for key, value in self.hit_bounds.items()},
+            "bounds": [bound.tolist() for bound in self.bounds] if self.bounds is not None else None,
         }
 
 
@@ -104,7 +133,6 @@ class SplitInfo:
     split_index: int
     split_time: float
     raw_gap_pre_shift: float
-    post_shift_gap: float
     post_join_gap_adj: float
     slope_gap: float
     penalized_score: float
@@ -173,7 +201,6 @@ class SegmentNode:
             payload.update(
                 {
                     "t_split": float(self.split.split_time),
-                    "post_shift_gap": float(self.split.post_join_gap_adj),
                     "post_join_gap_adj": float(self.split.post_join_gap_adj),
                     "raw_gap_pre_shift": float(self.split.raw_gap_pre_shift),
                     # Backward compatibility: emit legacy keys for one release.
@@ -223,12 +250,14 @@ class CandidateRecord:
     right_n: int
     model_left: str
     params_left: Dict[str, float]
+    guess_left: Dict[str, float]
     aicc_left: float
     rmse_left: float
     hit_bounds_left: Dict[str, bool]
     model_left_reason: str
     model_right: str
     params_right: Dict[str, float]
+    guess_right: Dict[str, float]
     aicc_right: float
     rmse_right: float
     hit_bounds_right: Dict[str, bool]
@@ -237,9 +266,9 @@ class CandidateRecord:
     delta_aicc: float
     rel_improvement: float
     raw_gap_pre_shift: float
-    post_shift_gap: float
     post_join_gap_adj: float
     slope_gap: float
+    slope_residual_after_shift: float
     violations: int
     time_pen: float
     level_shift_applied: float
@@ -258,6 +287,18 @@ class CandidateRecord:
     accept_reason: str
     tests_fired: List[str]
     right_time_shift_attempted: float
+    k0_left: float
+    n0_left: float
+    b0_left: float
+    k0_right: float
+    n0_right: float
+    b0_right: float
+    k_dist_left: float
+    n_dist_left: float
+    b_dist_left: float
+    k_dist_right: float
+    n_dist_right: float
+    b_dist_right: float
 
     def to_csv_row(self) -> Dict[str, object]:
         return {
@@ -269,12 +310,14 @@ class CandidateRecord:
             "right_n": self.right_n,
             "model_left": self.model_left,
             "params_left_json": json.dumps(self.params_left, sort_keys=True),
+            "guess_left_json": json.dumps(self.guess_left, sort_keys=True),
             "AICc_left": self.aicc_left,
             "RMSE_left": self.rmse_left,
             "hit_bounds_left_json": json.dumps(self.hit_bounds_left, sort_keys=True),
             "model_left_reason": self.model_left_reason,
             "model_right": self.model_right,
             "params_right_json": json.dumps(self.params_right, sort_keys=True),
+            "guess_right_json": json.dumps(self.guess_right, sort_keys=True),
             "AICc_right": self.aicc_right,
             "RMSE_right": self.rmse_right,
             "hit_bounds_right_json": json.dumps(self.hit_bounds_right, sort_keys=True),
@@ -283,9 +326,9 @@ class CandidateRecord:
             "delta_AICc": self.delta_aicc,
             "rel_impr": self.rel_improvement,
             "raw_gap_pre_shift": self.raw_gap_pre_shift,
-            "post_shift_gap": self.post_shift_gap,
             "post_join_gap_adj": self.post_join_gap_adj,
             "slope_gap": self.slope_gap,
+            "slope_residual_after_shift": self.slope_residual_after_shift,
             "violations": self.violations,
             "time_pen": self.time_pen,
             "level_shift_applied": self.level_shift_applied,
@@ -304,7 +347,29 @@ class CandidateRecord:
             "accept_reason": self.accept_reason,
             "tests_fired_json": json.dumps(self.tests_fired, sort_keys=True),
             "right_time_shift_attempted": self.right_time_shift_attempted,
+            "k0_left": self.k0_left,
+            "n0_left": self.n0_left,
+            "b0_left": self.b0_left,
+            "k0_right": self.k0_right,
+            "n0_right": self.n0_right,
+            "b0_right": self.b0_right,
+            "k_dist_left": self.k_dist_left,
+            "n_dist_left": self.n_dist_left,
+            "b_dist_left": self.b_dist_left,
+            "k_dist_right": self.k_dist_right,
+            "n_dist_right": self.n_dist_right,
+            "b_dist_right": self.b_dist_right,
         }
+
+
+@dataclass
+class CandidateMeta:
+    node_id: str
+    raw_grid: int
+    raw_lowess: int
+    union: int
+    spaced: int
+    feasible: int
 
 
 class FitCache:
@@ -350,7 +415,7 @@ MIDILLI_BOUNDS_BODY = (np.array([1e-8, 0.60, -2e-3]), np.array([2e-1, 2.20, 0.0]
 MIDILLI_BOUNDS_TAIL = (np.array([1e-8, 0.70, -6e-4]), np.array([6e-2, 2.30, 0.0]))
 
 # Keep, but this now works in tandem with MIDILLI_BOUNDS_* and the b-penalty
-MIDILLI_SOFT_BOUND = 1e-3
+DEFAULT_MIDILLI_SOFT_BOUND = 1e-3
 
 # === Segment classifiers ===
 TAIL_FRAC = 0.20          # rightmost fraction of timeline qualifies as tail
@@ -368,7 +433,10 @@ def _is_head(start: int, end: int, time: np.ndarray) -> bool:
     t_end = float(time[end - 1])
     t_max = float(time[-1])
     return t_end <= HEAD_FRAC * t_max
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "2.1.0"
+SCHEMA_NOTES = [
+    "2.1.0: Added candidate meta logs, slope residual metrics, runtime reporting, and new CLI guardrails.",
+]
 
 
 def _initial_guess_page(time: np.ndarray, values: np.ndarray) -> Tuple[float, float]:
@@ -379,11 +447,15 @@ def _initial_guess_page(time: np.ndarray, values: np.ndarray) -> Tuple[float, fl
     if np.count_nonzero(mask) >= 2 and np.all(transformed[mask] > 0):
         log_t = np.log(time[mask])
         log_transformed = np.log(transformed[mask])
-        slope, intercept = np.polyfit(log_t, log_transformed, deg=1)
-        n_guess = float(np.clip(slope, PAGE_BOUNDS[0][1], PAGE_BOUNDS[1][1]))
-        k_guess = float(np.clip(math.exp(intercept), PAGE_BOUNDS[0][0], PAGE_BOUNDS[1][0]))
-        if math.isfinite(k_guess) and math.isfinite(n_guess):
-            return k_guess, n_guess
+        try:
+            slope, intercept = np.polyfit(log_t, log_transformed, deg=1)
+        except (np.linalg.LinAlgError, ValueError):
+            slope, intercept = math.nan, math.nan
+        if math.isfinite(slope) and math.isfinite(intercept):
+            n_guess = float(np.clip(slope, PAGE_BOUNDS[0][1], PAGE_BOUNDS[1][1]))
+            k_guess = float(np.clip(math.exp(intercept), PAGE_BOUNDS[0][0], PAGE_BOUNDS[1][0]))
+            if math.isfinite(k_guess) and math.isfinite(n_guess):
+                return k_guess, n_guess
     return 0.05, 1.0
 
 
@@ -393,7 +465,10 @@ def _initial_guess_midilli(
     k_guess, n_guess = _initial_guess_page(time, values)
     if time.size >= 3:
         tail = min(5, time.size)
-        coef = np.polyfit(time[-tail:], values[-tail:], deg=1)
+        try:
+            coef = np.polyfit(time[-tail:], values[-tail:], deg=1)
+        except (np.linalg.LinAlgError, ValueError):
+            coef = [0.0, 0.0]
         b_guess = float(np.clip(coef[0], bounds[0][2], bounds[1][2]))
     else:
         b_guess = 0.0
@@ -416,15 +491,17 @@ def _compute_aicc(n_obs: int, rss: float, k_params: int) -> float:
 
 def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[FitStats]:
     guess = _initial_guess_page(time, values)
+    guess_payload = {"k0": float(guess[0]), "n0": float(guess[1]), "b0": 0.0}
     try:
-        params, _ = curve_fit(
-            lambda t, k, n: page_model(t, k, n),
-            time,
-            values,
-            p0=guess,
-            bounds=PAGE_BOUNDS,
-            maxfev=max_iter,
-        )
+        with _scipy_random_state():
+            params, _ = curve_fit(
+                lambda t, k, n: page_model(t, k, n),
+                time,
+                values,
+                p0=guess,
+                bounds=PAGE_BOUNDS,
+                maxfev=max_iter,
+            )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
     params = np.clip(params, PAGE_BOUNDS[0], PAGE_BOUNDS[1])
@@ -454,6 +531,8 @@ def _fit_page(time: np.ndarray, values: np.ndarray, max_iter: int) -> Optional[F
         saturates_bound=any(hit_bounds.values()),
         predictions=predictions,
         hit_bounds=hit_bounds,
+        initial_guess=guess_payload,
+        bounds=PAGE_BOUNDS,
     )
 
 
@@ -464,16 +543,18 @@ def _fit_midilli(
     bounds: Tuple[np.ndarray, np.ndarray],
 ) -> Optional[FitStats]:
     guess = _initial_guess_midilli(time, values, bounds)
+    guess_payload = {"k0": float(guess[0]), "n0": float(guess[1]), "b0": float(guess[2])}
 
     try:
-        params, _ = curve_fit(
-            lambda t, k, n, b: midilli_model(t, k, n, b),
-            time,
-            values,
-            p0=guess,
-            bounds=bounds,
-            maxfev=max_iter,
-        )
+        with _scipy_random_state():
+            params, _ = curve_fit(
+                lambda t, k, n, b: midilli_model(t, k, n, b),
+                time,
+                values,
+                p0=guess,
+                bounds=bounds,
+                maxfev=max_iter,
+            )
     except Exception:  # pragma: no cover - scipy raises runtime errors
         return None
     params = np.clip(params, bounds[0], bounds[1])
@@ -501,6 +582,8 @@ def _fit_midilli(
         saturates_bound=saturates,
         predictions=predictions,
         hit_bounds=hit_bounds,
+        initial_guess=guess_payload,
+        bounds=bounds,
     )
 
 
@@ -565,6 +648,11 @@ def select_best_model(
     is_head = _is_head(start, end, time)
 
     mid_bounds = MIDILLI_BOUNDS_TAIL if is_tail else MIDILLI_BOUNDS_BODY
+    if (not is_head) and (not is_tail):
+        lb, ub = MIDILLI_BOUNDS_BODY
+        ub_relaxed = ub.copy()
+        ub_relaxed[1] = 2.40
+        mid_bounds = (lb, ub_relaxed)
 
     page = fit_segment("Page", start, end, time, values, cache, cfg.max_iter)
     mid = fit_segment(
@@ -596,6 +684,10 @@ def select_best_model(
     fallback_trigger = mid.saturates_bound or mid.hit_bounds.get("b", False)
     if fallback_trigger and page.aicc <= mid.aicc + cfg.page_fallback_eps:
         return (page, "page_fallback")
+
+    if (not is_head) and (not is_tail) and cfg.allow_per_segment_model:
+        if abs(page.aicc - mid.aicc) <= cfg.midbody_aicc_tolerance:
+            return (page, "page_midbody_tie")
 
     if cfg.allow_per_segment_model and page.aicc < mid.aicc - 1e-9:
         return (page, "page")
@@ -649,19 +741,20 @@ def generate_candidates(
     time: np.ndarray,
     values: np.ndarray,
     cfg: Config,
-) -> List[int]:
+    lowess_cache: Dict[Tuple[int, int, float], np.ndarray],
+) -> Tuple[List[int], CandidateMeta]:
     start = node.start
     end = node.end
     length = end - start
     if length < cfg.min_points_leaf * 2:
-        return []
+        return [], CandidateMeta(node.node_id, 0, 0, 0, 0, 0)
     allowed_min = start + cfg.min_points_leaf - 1
     allowed_max = end - cfg.min_points_leaf - 1
     if allowed_min > allowed_max:
-        return []
+        return [], CandidateMeta(node.node_id, 0, 0, 0, 0, 0)
     grid = np.linspace(allowed_min, allowed_max, cfg.candidate_grid_count)
     grid_indices = {int(round(idx)) for idx in grid}
-    grid_indices = {idx for idx in grid_indices if allowed_min <= idx <= allowed_max}
+    raw_grid = len(grid_indices)
     segment_time = time[start:end]
     base_pred = _segment_base_predictions(
         node.fit, segment_time, node.right_time_shift_at_boundary
@@ -676,17 +769,25 @@ def generate_candidates(
     lowess_indices: set[int] = set()
     for frac in fractions:
         frac_clamped = float(np.clip(frac, 0.01, 0.99))
-        smoothed = lowess(residuals, time[start:end], frac=frac_clamped, return_sorted=False)
+        cache_key = (start, end, round(frac_clamped, 6))
+        if cache_key in lowess_cache:
+            smoothed = lowess_cache[cache_key]
+        else:
+            smoothed = lowess(residuals, time[start:end], frac=frac_clamped, return_sorted=False)
+            lowess_cache[cache_key] = smoothed
         for idx in _find_lowess_extrema(residuals, smoothed):
             candidate = start + idx
-            if allowed_min <= candidate <= allowed_max:
-                lowess_indices.add(candidate)
-    candidates = sorted(grid_indices.union(lowess_indices))
+            lowess_indices.add(candidate)
+    raw_lowess = len(lowess_indices)
+    union_candidates = sorted(grid_indices.union(lowess_indices))
+    union_count = len(union_candidates)
+    clamped_candidates = sorted({int(np.clip(idx, allowed_min, allowed_max)) for idx in union_candidates})
     min_spacing = max(1, int(cfg.candidate_min_spacing))
     spaced_candidates: List[int] = []
-    for candidate in candidates:
+    for candidate in clamped_candidates:
         if not spaced_candidates or candidate - spaced_candidates[-1] >= min_spacing:
             spaced_candidates.append(candidate)
+    spaced_count = len(spaced_candidates)
     feasible: List[int] = []
     for split_idx in spaced_candidates:
         left_len = split_idx - start + 1
@@ -707,7 +808,15 @@ def generate_candidates(
             )
             continue
         feasible.append(split_idx)
-    return feasible
+    meta = CandidateMeta(
+        node_id=node.node_id,
+        raw_grid=raw_grid,
+        raw_lowess=raw_lowess,
+        union=union_count,
+        spaced=spaced_count,
+        feasible=len(feasible),
+    )
+    return feasible, meta
 
 
 def _model_value_and_slope(fit: FitStats, time_value: float) -> Tuple[float, float]:
@@ -760,17 +869,24 @@ def _combine_predictions(
 
 
 def _post_join_gap_after_adjustments(
-    left_value: float,
-    left_slope: float,
+    left_fit: FitStats,
     right_fit: FitStats,
-    right_time: float,
+    split_time: float,
+    first_right_time: float,
     right_time_shift: float,
 ) -> Tuple[float, float, float]:
-    adjusted_time = max(float(right_time + right_time_shift), 1e-8)
-    right_value, right_slope = _model_value_and_slope(right_fit, adjusted_time)
-    level_shift = left_value - right_value
-    post_join_gap = abs(left_value - (right_value + level_shift))
-    slope_gap = abs(left_slope - right_slope)
+    vL_split, sL_split = _model_value_and_slope(left_fit, split_time)
+    vR_at_split_after_shift, sR_split = _model_value_and_slope(
+        right_fit, max(split_time + right_time_shift, 1e-8)
+    )
+    level_shift = vL_split - vR_at_split_after_shift
+
+    vR_first_after_shift, _ = _model_value_and_slope(
+        right_fit, max(first_right_time + right_time_shift, 1e-8)
+    )
+    post_join_gap = abs(vL_split - (vR_first_after_shift + level_shift))
+
+    slope_gap = abs(sL_split - sR_split)
     return post_join_gap, slope_gap, level_shift
 
 
@@ -831,10 +947,27 @@ def _time_penalty(split_time: float, node: SegmentNode, time: np.ndarray, cfg: C
 def _b_penalty(fit: FitStats, cfg: Config) -> float:
     if fit.family != "Midilli" or cfg.lambda_b <= 0:
         return 0.0
-    excess = max(abs(fit.params.get("b", 0.0)) - MIDILLI_SOFT_BOUND, 0.0)
+    bound = max(cfg.midilli_b_softbound, 0.0)
+    excess = max(abs(fit.params.get("b", 0.0)) - bound, 0.0)
     if excess <= 0:
         return 0.0
     return cfg.lambda_b * (excess**2)
+
+
+def _param_distance_to_bounds(fit: FitStats, param: str) -> float:
+    if fit.bounds is None or param not in fit.params:
+        return float("nan")
+    index_map = {"k": 0, "n": 1, "b": 2}
+    idx = index_map.get(param)
+    if idx is None:
+        return float("nan")
+    lower_bounds, upper_bounds = fit.bounds
+    if idx >= lower_bounds.size or idx >= upper_bounds.size:
+        return float("nan")
+    value = fit.params.get(param)
+    if value is None:
+        return float("nan")
+    return float(min(value - float(lower_bounds[idx]), float(upper_bounds[idx]) - value))
 
 
 def score_candidate(
@@ -846,6 +979,7 @@ def score_candidate(
     cfg: Config,
     dataset_name: str,
     budget_sum_gaps: float,
+    current_best: float,
 ) -> Tuple[Optional[SplitInfo], CandidateRecord]:
     start = node.start
     end = node.end
@@ -876,12 +1010,14 @@ def score_candidate(
             right_n=right_n,
             model_left=left_stats.family if left_stats else "",
             params_left=left_stats.params if left_stats else {},
+            guess_left=left_stats.initial_guess if left_stats else {},
             aicc_left=left_stats.aicc if left_stats else float("nan"),
             rmse_left=left_stats.rmse if left_stats else float("nan"),
             hit_bounds_left=left_stats.hit_bounds if left_stats else {},
             model_left_reason=left_reason,
             model_right=right_stats.family if right_stats else "",
             params_right=right_stats.params if right_stats else {},
+            guess_right=right_stats.initial_guess if right_stats else {},
             aicc_right=right_stats.aicc if right_stats else float("nan"),
             rmse_right=right_stats.rmse if right_stats else float("nan"),
             hit_bounds_right=right_stats.hit_bounds if right_stats else {},
@@ -890,9 +1026,9 @@ def score_candidate(
             delta_aicc=float("nan"),
             rel_improvement=float("nan"),
             raw_gap_pre_shift=float("nan"),
-            post_shift_gap=float("nan"),
             post_join_gap_adj=float("nan"),
             slope_gap=float("nan"),
+            slope_residual_after_shift=float("nan"),
             violations=0,
             time_pen=0.0,
             level_shift_applied=0.0,
@@ -911,6 +1047,18 @@ def score_candidate(
             accept_reason=accept_reason,
             tests_fired=tests,
             right_time_shift_attempted=float("nan"),
+            k0_left=float("nan"),
+            n0_left=float("nan"),
+            b0_left=float("nan"),
+            k0_right=float("nan"),
+            n0_right=float("nan"),
+            b0_right=float("nan"),
+            k_dist_left=float("nan"),
+            n_dist_left=float("nan"),
+            b_dist_left=float("nan"),
+            k_dist_right=float("nan"),
+            n_dist_right=float("nan"),
+            b_dist_right=float("nan"),
         )
         return None, record
 
@@ -924,32 +1072,108 @@ def score_candidate(
     denom = max(abs(node.fit.aicc), 1e-9)
     rel_impr = (node.fit.aicc - base) / denom
 
-    value_left, slope_left = _model_value_and_slope(left_stats, split_time)
+    left_guess = left_stats.initial_guess
+    right_guess = right_stats.initial_guess
+    k0_left = float(left_guess.get("k0", float("nan")))
+    n0_left = float(left_guess.get("n0", float("nan")))
+    b0_left = float(left_guess.get("b0", float("nan")))
+    k0_right = float(right_guess.get("k0", float("nan")))
+    n0_right = float(right_guess.get("n0", float("nan")))
+    b0_right = float(right_guess.get("b0", float("nan")))
+
+    k_dist_left = _param_distance_to_bounds(left_stats, "k")
+    n_dist_left = _param_distance_to_bounds(left_stats, "n")
+    b_dist_left = _param_distance_to_bounds(left_stats, "b")
+    k_dist_right = _param_distance_to_bounds(right_stats, "k")
+    n_dist_right = _param_distance_to_bounds(right_stats, "n")
+    b_dist_right = _param_distance_to_bounds(right_stats, "b")
+
+    if base > current_best:
+        rejected = True
+        reason = "dominated"
+        tests.append("dominated")
+        record = CandidateRecord(
+            file=dataset_name,
+            node_id=node.node_id,
+            t_split=float(time[split_idx]),
+            t_idx=split_idx,
+            left_n=left_n,
+            right_n=right_n,
+            model_left=left_stats.family,
+            params_left=left_stats.params,
+            guess_left=left_stats.initial_guess,
+            aicc_left=left_stats.aicc,
+            rmse_left=left_stats.rmse,
+            hit_bounds_left=left_stats.hit_bounds,
+            model_left_reason=left_reason,
+            model_right=right_stats.family,
+            params_right=right_stats.params,
+            guess_right=right_stats.initial_guess,
+            aicc_right=right_stats.aicc,
+            rmse_right=right_stats.rmse,
+            hit_bounds_right=right_stats.hit_bounds,
+            model_right_reason=right_reason,
+            aicc_unsplit=node.fit.aicc,
+            delta_aicc=delta_aicc,
+            rel_improvement=rel_impr,
+            raw_gap_pre_shift=float("nan"),
+            post_join_gap_adj=float("nan"),
+            slope_gap=float("nan"),
+            slope_residual_after_shift=float("nan"),
+            violations=0,
+            time_pen=0.0,
+            level_shift_applied=0.0,
+            b_pen_left=0.0,
+            b_pen_right=0.0,
+            base_aicc_sum=base,
+            gap_pen=0.0,
+            slope_pen=0.0,
+            mono_pen=0.0,
+            time_pen_comp=0.0,
+            b_pen_left_comp=0.0,
+            b_pen_right_comp=0.0,
+            penalized_score=base,
+            rejected_flag=True,
+            reject_reason=reason,
+            accept_reason=accept_reason,
+            tests_fired=tests,
+            right_time_shift_attempted=0.0,
+            k0_left=k0_left,
+            n0_left=n0_left,
+            b0_left=b0_left,
+            k0_right=k0_right,
+            n0_right=n0_right,
+            b0_right=b0_right,
+            k_dist_left=k_dist_left,
+            n_dist_left=n_dist_left,
+            b_dist_left=b_dist_left,
+            k_dist_right=k_dist_right,
+            n_dist_right=n_dist_right,
+            b_dist_right=b_dist_right,
+        )
+        return None, record
+
     right_time = float(time[split_idx + 1])
+    value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     value_right_raw, slope_right_raw = _model_value_and_slope(right_stats, right_time)
     raw_gap_pre_shift = abs(value_left - value_right_raw)
 
-    initial_slope_gap = abs(slope_left - slope_right_raw)
-    slope_tol = cfg.max_allowed_slope_gap + cfg.max_allowed_slope_eps
     max_shift = max(right_time - split_time, 0.0)
     right_time_shift_attempted = 0.0
-    if (
-        math.isfinite(slope_left)
-        and math.isfinite(slope_right_raw)
-        and initial_slope_gap <= slope_tol
-        and max_shift > 0.0
-        and initial_slope_gap > cfg.max_allowed_slope_eps
-    ):
+    if math.isfinite(slope_left) and math.isfinite(slope_right_raw) and max_shift > 0.0:
         shift = _solve_time_shift_for_slope_match(
             right_stats, right_time, slope_left, max_shift
         )
         if math.isfinite(shift) and shift != 0.0:
-            right_time_shift_attempted = float(np.clip(shift, -max_shift, max_shift))
+            right_time_shift_attempted = float(np.clip(shift, 0.0, max_shift))
 
     post_join_gap_adj, slope_gap, level_shift = _post_join_gap_after_adjustments(
-        value_left, slope_left, right_stats, right_time, right_time_shift_attempted
+        left_stats, right_stats, split_time, right_time, right_time_shift_attempted
     )
-    post_shift_gap = post_join_gap_adj
+    slope_residual_after_shift = abs(
+        _segment_slope_at(right_stats, max(right_time + right_time_shift_attempted, 1e-8))
+        - slope_left
+    )
     time_pen = _time_penalty(split_time, node, time, cfg)
     combined_preds = _combine_predictions(
         left_stats,
@@ -967,7 +1191,7 @@ def score_candidate(
         rejected = True
         reason = "nan_metric"
         tests.append("nan_metric")
-    if raw_gap_pre_shift > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
+    if post_join_gap_adj > cfg.max_allowed_gap + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_limit"
         tests.append("gap_limit")
@@ -975,7 +1199,11 @@ def score_candidate(
         rejected = True
         reason = "slope_limit"
         tests.append("slope_limit")
-    if cfg.reject_nonmonotone and violations > 0:
+    if cfg.monotonic_hardcap > 0 and violations > cfg.monotonic_hardcap:
+        rejected = True
+        reason = "monotonic_hardcap"
+        tests.append("monotonic_hardcap")
+    elif cfg.reject_nonmonotone and violations > 0:
         rejected = True
         reason = "nonmonotone"
         tests.append("nonmonotone")
@@ -983,7 +1211,7 @@ def score_candidate(
         rejected = True
         reason = "rel_improvement"
         tests.append("rel_improvement")
-    if budget_sum_gaps + raw_gap_pre_shift > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
+    if budget_sum_gaps + post_join_gap_adj > cfg.total_gap_budget + cfg.max_allowed_gap_eps:
         rejected = True
         reason = "gap_budget"
         tests.append("gap_budget")
@@ -992,7 +1220,7 @@ def score_candidate(
     b_pen_right = _b_penalty(right_stats, cfg)
 
     gap_pen_component = (
-        cfg.join_penalty * (raw_gap_pre_shift**2) if math.isfinite(raw_gap_pre_shift) else float("nan")
+        cfg.join_penalty * (post_join_gap_adj**2) if math.isfinite(post_join_gap_adj) else float("nan")
     )
     slope_pen_component = (
         cfg.slope_penalty * (slope_gap**2) if math.isfinite(slope_gap) else float("nan")
@@ -1009,6 +1237,7 @@ def score_candidate(
         "raw_gap_pre_shift": raw_gap_pre_shift,
         "post_join_gap_adj": post_join_gap_adj,
         "right_time_shift_attempted": right_time_shift_attempted,
+        "slope_residual_after_shift": slope_residual_after_shift,
     }
 
     score = base + gap_pen_component + slope_pen_component
@@ -1027,7 +1256,6 @@ def score_candidate(
             split_idx,
             split_time,
             raw_gap_pre_shift,
-            post_shift_gap,
             post_join_gap_adj,
             slope_gap,
             score,
@@ -1059,12 +1287,14 @@ def score_candidate(
         right_n=right_n,
         model_left=left_stats.family,
         params_left=left_stats.params,
+        guess_left=left_stats.initial_guess,
         aicc_left=left_stats.aicc,
         rmse_left=left_stats.rmse,
         hit_bounds_left=left_stats.hit_bounds,
         model_left_reason=left_reason,
         model_right=right_stats.family,
         params_right=right_stats.params,
+        guess_right=right_stats.initial_guess,
         aicc_right=right_stats.aicc,
         rmse_right=right_stats.rmse,
         hit_bounds_right=right_stats.hit_bounds,
@@ -1073,9 +1303,9 @@ def score_candidate(
         delta_aicc=delta_aicc,
         rel_improvement=rel_impr,
         raw_gap_pre_shift=raw_gap_pre_shift,
-        post_shift_gap=post_shift_gap,
         post_join_gap_adj=post_join_gap_adj,
         slope_gap=slope_gap,
+        slope_residual_after_shift=slope_residual_after_shift,
         violations=violations,
         time_pen=time_pen,
         level_shift_applied=level_shift,
@@ -1094,6 +1324,18 @@ def score_candidate(
         accept_reason=accept_reason,
         tests_fired=tests,
         right_time_shift_attempted=right_time_shift_attempted,
+        k0_left=k0_left,
+        n0_left=n0_left,
+        b0_left=b0_left,
+        k0_right=k0_right,
+        n0_right=n0_right,
+        b0_right=b0_right,
+        k_dist_left=k_dist_left,
+        n_dist_left=n_dist_left,
+        b_dist_left=b_dist_left,
+        k_dist_right=k_dist_right,
+        n_dist_right=n_dist_right,
+        b_dist_right=b_dist_right,
     )
     return split_info, record
 
@@ -1174,7 +1416,8 @@ def compute_child_evidence(
     runs_p, _ = _runs_test(residuals_child)
     amplitude = _residual_lowess_amplitude(time[child_slice], residuals_child, cfg.lowess_frac_root)
     sigma = max(float(np.std(residuals_child)), 1e-8)
-    amp_norm = amplitude / sigma
+    n_points = max(residuals_child.size, 1)
+    amp_norm = (amplitude / sigma) / math.sqrt(float(n_points))
     slope_changes = _slope_sign_changes(residuals_child)
     score = float(delta - 0.5 * amp_norm - 0.25 * slope_changes - (1.0 - clamp01(runs_p)))
     return Evidence(delta, runs_p, amplitude, slope_changes, score)
@@ -1238,40 +1481,77 @@ def _solve_time_shift_for_slope_match(
     delta = 0.0
     current_time = base_time
     tol = 1e-8 + 1e-3 * abs(target_slope)
+    used_newton = True
     for _ in range(6):
         slope_here = _segment_slope_at(fit, current_time)
         if not math.isfinite(slope_here):
-            return 0.0
+            used_newton = False
+            break
         error = slope_here - target_slope
         if abs(error) <= tol:
             break
         step_radius = min(max_shift, max(current_time * 0.5, 1e-6))
         left_time = max(current_time - step_radius, 1e-8)
-        right_time = current_time + step_radius
+        right_time = min(current_time + step_radius, base_time + max_shift)
         slope_left = _segment_slope_at(fit, left_time)
         slope_right = _segment_slope_at(fit, right_time)
         denom = right_time - left_time
         if denom <= 0:
+            used_newton = False
             break
         slope_prime = (slope_right - slope_left) / denom
         if not math.isfinite(slope_prime) or abs(slope_prime) < 1e-12:
+            used_newton = False
             break
         step = error / slope_prime
-        delta -= step
-        delta = float(np.clip(delta, -max_shift, max_shift))
-        current_time = base_time + delta
-        if current_time <= 0.0:
-            current_time = max(1e-8, base_time - max_shift)
-            delta = current_time - base_time
+        proposed_time = current_time - step
+        if proposed_time < base_time or proposed_time > base_time + max_shift:
+            used_newton = False
+            break
+        current_time = proposed_time
+        delta = current_time - base_time
         if abs(step) <= tol:
             break
-    final_time = base_time + delta
+    final_time = current_time
+    if not used_newton:
+        left_shift = 0.0
+        right_shift = max_shift
+        best_shift = 0.0
+        best_error = abs(initial_slope - target_slope)
+        slope_left_val = initial_slope
+        slope_right_val = _segment_slope_at(fit, base_time + max_shift)
+        if not math.isfinite(slope_right_val):
+            slope_right_val = slope_left_val
+        right_error = abs(slope_right_val - target_slope)
+        if right_error < best_error:
+            best_error = right_error
+            best_shift = max_shift
+        for _ in range(8):
+            mid_shift = 0.5 * (left_shift + right_shift)
+            mid_time = base_time + mid_shift
+            slope_mid = _segment_slope_at(fit, mid_time)
+            if not math.isfinite(slope_mid):
+                break
+            error_mid = abs(slope_mid - target_slope)
+            if error_mid < best_error:
+                best_error = error_mid
+                best_shift = mid_shift
+            left_error = abs(slope_left_val - target_slope)
+            right_error = abs(slope_right_val - target_slope)
+            if left_error <= right_error:
+                right_shift = mid_shift
+                slope_right_val = slope_mid
+            else:
+                left_shift = mid_shift
+                slope_left_val = slope_mid
+        final_time = base_time + best_shift
+        delta = best_shift
     final_slope = _segment_slope_at(fit, final_time)
     if not math.isfinite(final_slope):
         return 0.0
     if abs(final_slope - target_slope) >= abs(initial_slope - target_slope):
         return 0.0
-    return delta
+    return max(0.0, min(delta, max_shift))
 
 
 def update_node_diagnostics(node: SegmentNode, time: np.ndarray, values: np.ndarray, cfg: Config) -> None:
@@ -1303,19 +1583,33 @@ def recurse_node(
     dataset_name: str,
     budget: BudgetState,
     candidate_records: List[CandidateRecord],
+    candidate_meta: List[CandidateMeta],
+    lowess_cache: Dict[Tuple[int, int, float], np.ndarray],
     is_probe: bool = False,
+    probe_passes_remaining: int = 0,
 ) -> None:
     if node.depth >= cfg.max_depth:
         return
     if budget.splits_used >= cfg.max_splits:
         return
-    candidates = generate_candidates(node, time, values, cfg)
+    candidates, meta = generate_candidates(node, time, values, cfg, lowess_cache)
+    candidate_meta.append(meta)
     if not candidates:
         return
     best_info: Optional[SplitInfo] = None
     best_score = float("inf")
     for idx in candidates:
-        info, record = score_candidate(node, idx, time, values, cache, cfg, dataset_name, budget.sum_gaps)
+        info, record = score_candidate(
+            node,
+            idx,
+            time,
+            values,
+            cache,
+            cfg,
+            dataset_name,
+            budget.sum_gaps,
+            best_score,
+        )
         candidate_records.append(record)
         if info is not None and info.penalized_score < best_score:
             best_info = info
@@ -1362,7 +1656,7 @@ def recurse_node(
         ordered_children = sorted(node.children, key=_evidence_key, reverse=True)
     else:
         ordered_children = list(node.children)
-    if is_probe:
+    if is_probe and probe_passes_remaining <= 0:
         return
 
     for idx, child in enumerate(ordered_children):
@@ -1371,6 +1665,12 @@ def recurse_node(
         if child.depth >= cfg.max_depth:
             continue
         child_probe = cfg.probe_better_child and idx > 0
+        if is_probe:
+            child_passes = max(probe_passes_remaining - 1, 0)
+        else:
+            child_passes = cfg.probe_better_child_passes
+        if child_probe:
+            child_passes = max(child_passes - 1, 0)
         recurse_node(
             child,
             time,
@@ -1380,7 +1680,10 @@ def recurse_node(
             dataset_name,
             budget,
             candidate_records,
+            candidate_meta,
+            lowess_cache,
             is_probe=child_probe,
+            probe_passes_remaining=child_passes,
         )
 
 
@@ -1435,12 +1738,14 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "right_n",
         "model_left",
         "params_left_json",
+        "guess_left_json",
         "AICc_left",
         "RMSE_left",
         "hit_bounds_left_json",
         "model_left_reason",
         "model_right",
         "params_right_json",
+        "guess_right_json",
         "AICc_right",
         "RMSE_right",
         "hit_bounds_right_json",
@@ -1449,9 +1754,9 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "delta_AICc",
         "rel_impr",
         "raw_gap_pre_shift",
-        "post_shift_gap",
         "post_join_gap_adj",
         "slope_gap",
+        "slope_residual_after_shift",
         "violations",
         "time_pen",
         "level_shift_applied",
@@ -1470,6 +1775,18 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "accept_reason",
         "tests_fired_json",
         "right_time_shift_attempted",
+        "k0_left",
+        "n0_left",
+        "b0_left",
+        "k0_right",
+        "n0_right",
+        "b0_right",
+        "k_dist_left",
+        "n_dist_left",
+        "b_dist_left",
+        "k_dist_right",
+        "n_dist_right",
+        "b_dist_right",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -1478,11 +1795,35 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
             writer.writerow(record.to_csv_row())
 
 
-def collect_split_metrics(node: SegmentNode) -> List[Tuple[float, float, float]]:
-    splits: List[Tuple[float, float, float]] = []
+def write_candidate_meta_log(path: Path, records: List[CandidateMeta]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["node_id", "raw_grid", "raw_lowess", "union", "spaced", "feasible"]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(
+                {
+                    "node_id": record.node_id,
+                    "raw_grid": record.raw_grid,
+                    "raw_lowess": record.raw_lowess,
+                    "union": record.union,
+                    "spaced": record.spaced,
+                    "feasible": record.feasible,
+                }
+            )
+
+
+def collect_split_metrics(node: SegmentNode) -> List[Tuple[str, float, float, float]]:
+    splits: List[Tuple[str, float, float, float]] = []
     if node.split is not None:
         splits.append(
-            (node.split.split_time, node.split.post_join_gap_adj, node.split.slope_gap)
+            (
+                node.node_id,
+                node.split.split_time,
+                node.split.post_join_gap_adj,
+                node.split.slope_gap,
+            )
         )
         for child in node.children:
             splits.extend(collect_split_metrics(child))
@@ -1499,17 +1840,20 @@ def create_plots(
     root: SegmentNode,
     cfg: Config,
 ) -> Dict[str, str]:
+    if cfg.no_plots:
+        return {}
     outdir.mkdir(parents=True, exist_ok=True)
     plots: Dict[str, str] = {}
 
     splits = collect_split_metrics(root)
+    leaves = [node for node in gather_nodes(root) if node.is_leaf()]
 
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(time, values, "o", label="Observed", alpha=0.6)
     ax.plot(time, preds, "-", label="Piecewise fit (raw)", linewidth=2)
     if np.any(corrected != preds):
         ax.plot(time, corrected, "--", label="Isotonic fit")
-    for split_time, gap, slope_gap in splits:
+    for node_id, split_time, gap, slope_gap in splits:
         ax.axvline(split_time, color="red", linestyle="--", alpha=0.6)
         ax.text(
             split_time,
@@ -1520,6 +1864,29 @@ def create_plots(
             ha="right",
             fontsize=8,
             color="red",
+        )
+    y_min, y_max = ax.get_ylim()
+    y_range = y_max - y_min if y_max > y_min else 1.0
+    for leaf in leaves:
+        segment_mid = (leaf.start + leaf.end - 1) // 2
+        mid_time = float(time[segment_mid])
+        mean_val = float(np.mean(values[leaf.start : leaf.end]))
+        params = leaf.fit.params
+        if leaf.fit.family == "Page":
+            label = f"Page(k={params['k']:.3f}, n={params['n']:.3f})\nAICc={leaf.fit.aicc:.2f}"
+        else:
+            label = (
+                f"Mid(k={params['k']:.3f}, n={params['n']:.3f}, b={params.get('b', 0.0):.4f})"
+                f"\nAICc={leaf.fit.aicc:.2f}"
+            )
+        ax.text(
+            mid_time,
+            mean_val + 0.02 * y_range,
+            label,
+            fontsize=8,
+            ha="center",
+            va="bottom",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.6),
         )
     ax.set_xlabel("Time")
     ax.set_ylabel("Moisture ratio")
@@ -1537,7 +1904,7 @@ def create_plots(
     ax.plot(time, residuals, "o", label="Residuals", alpha=0.6)
     smooth = lowess(residuals, time, frac=float(np.clip(cfg.lowess_frac_root, 0.01, 0.99)), return_sorted=False)
     ax.plot(time, smooth, "-", label="LOWESS")
-    for split_time, _, _ in splits:
+    for _, split_time, _, _ in splits:
         ax.axvline(split_time, color="red", linestyle=":", alpha=0.5)
     ax.axhline(0.0, color="black", linewidth=1)
     ax.set_xlabel("Time")
@@ -1555,11 +1922,11 @@ def create_plots(
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(time[1:], diffs, "-", label="Δŷ")
     ax.axhline(0.0, color="black", linewidth=1)
-    for split_time, _, _ in splits:
+    for _, split_time, _, _ in splits:
         ax.axvline(split_time, color="red", linestyle=":", alpha=0.5)
     ax.set_xlabel("Time")
-    ax.set_ylabel("Forward difference")
-    ax.set_title("Monotonicity diagnostics")
+    ax.set_ylabel("Change in prediction")
+    ax.set_title("Piecewise prediction differences")
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()
@@ -1567,6 +1934,94 @@ def create_plots(
     fig.savefig(path_mono, dpi=200)
     plt.close(fig)
     plots["monotonic"] = str(path_mono)
+
+    split_nodes = [node for node in gather_nodes(root) if node.split is not None]
+    for node in split_nodes:
+        split = node.split
+        split_idx = split.split_index
+        left_idx = max(node.start, split_idx - 5)
+        right_idx = min(node.end, split_idx + 6)
+        window = slice(left_idx, right_idx)
+        window_time = time[window]
+        window_values = values[window]
+        combined = _combine_predictions(
+            split.left,
+            split.right,
+            node.start,
+            split_idx,
+            node.end,
+            time,
+            split.level_shift_applied,
+            split.right_time_shift_attempted,
+        )
+        combined = combined + node.offset
+        combined_raw = _combine_predictions(
+            split.left,
+            split.right,
+            node.start,
+            split_idx,
+            node.end,
+            time,
+            0.0,
+            split.right_time_shift_attempted,
+        )
+        combined_raw = combined_raw + node.offset
+        window_pred = combined[window.start - node.start : window.stop - node.start]
+        window_raw = combined_raw[window.start - node.start : window.stop - node.start]
+        value_left, slope_left = _model_value_and_slope(split.left, split.split_time)
+        value_right_shifted, slope_right_shifted = _model_value_and_slope(
+            split.right,
+            max(split.split_time + split.right_time_shift_attempted, 1e-8),
+        )
+        value_right_shifted += split.level_shift_applied
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(window_time, window_values, "o", label="Observed", alpha=0.7)
+        ax.plot(window_time, window_pred, "-", label="Adjusted join", linewidth=2)
+        ax.plot(window_time, window_raw, "--", label="Pre level shift", linewidth=1.5)
+        delta = max((window_time[-1] - window_time[0]) * 0.1, 1e-6)
+        slope_times = np.array([
+            split.split_time - delta,
+            split.split_time + delta,
+        ])
+        left_line = value_left + slope_left * (slope_times - split.split_time)
+        right_line = value_right_shifted + slope_right_shifted * (slope_times - split.split_time)
+        ax.plot(slope_times, left_line, color="green", linestyle=":", label="Left slope")
+        ax.plot(slope_times, right_line, color="purple", linestyle=":", label="Right slope")
+        ax.set_title(f"Join neighborhood for node {node.node_id}")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Moisture ratio")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        path_join = outdir / f"{dataset_name}_join_{node.node_id}.png"
+        fig.savefig(path_join, dpi=200)
+        plt.close(fig)
+        plots[f"join_{node.node_id}"] = str(path_join)
+
+    if leaves:
+        fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        mid_times = [float(time[(leaf.start + leaf.end - 1) // 2]) for leaf in leaves]
+        k_vals = [leaf.fit.params.get("k", float("nan")) for leaf in leaves]
+        n_vals = [leaf.fit.params.get("n", float("nan")) for leaf in leaves]
+        b_vals = [leaf.fit.params.get("b", 0.0) for leaf in leaves]
+        axes[0].plot(mid_times, k_vals, "o-", label="k")
+        axes[0].set_ylabel("k")
+        axes[0].grid(True, alpha=0.3)
+        axes[1].plot(mid_times, n_vals, "o-", color="orange", label="n")
+        axes[1].set_ylabel("n")
+        axes[1].grid(True, alpha=0.3)
+        axes[2].plot(mid_times, b_vals, "o-", color="purple", label="b")
+        axes[2].set_ylabel("b")
+        axes[2].set_xlabel("Time")
+        axes[2].grid(True, alpha=0.3)
+        for axis in axes:
+            axis.legend(loc="best")
+        fig.suptitle("Parameter trajectories across leaves")
+        fig.tight_layout()
+        path_params = outdir / f"{dataset_name}_parameter_trajectory.png"
+        fig.savefig(path_params, dpi=200)
+        plt.close(fig)
+        plots["parameter_trajectory"] = str(path_params)
 
     return plots
 
@@ -1605,6 +2060,12 @@ CLI_FIELDS = [
     "lambda_b",
     "page_fallback_eps",
     "log_level",
+    "midbody_aicc_tolerance",
+    "monotonic_hardcap",
+    "midilli_b_softbound",
+    "probe_better_child_passes",
+    "export_leaves_csv",
+    "no_plots",
 ]
 
 
@@ -1634,33 +2095,65 @@ def _get_version() -> Optional[str]:
 
 
 def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
+    global _GLOBAL_RNG
+    if _GLOBAL_RNG is None:
+        _GLOBAL_RNG = np.random.default_rng(cfg.seed)
+        np.random.seed(cfg.seed)
+
     logger = logging.getLogger(__name__)
+    dataset_start = timemod.perf_counter()
     result = load_and_preprocess(path)
-    time = result.time_min.astype(float)
-    values = result.mr_iso.astype(float)
-    if time.size < cfg.min_points_root:
+    t = result.time_min.astype(float)
+    y = result.mr_iso.astype(float)
+    mask = np.isfinite(t) & np.isfinite(y)
+    dropped_nonfinite = int(t.size - int(np.count_nonzero(mask)))
+    if dropped_nonfinite:
+        logger.warning(
+            "Dataset %s dropped %d rows with non-finite entries.", path.name, dropped_nonfinite
+        )
+        t = t[mask]
+        y = y[mask]
+    if t.size == 0:
+        raise RuntimeError(f"Dataset {path} contains no valid rows after filtering")
+    if t.size < cfg.min_points_root:
         logger.warning(
             "Dataset %s has only %d points (< min_points_root=%d); recursion disabled.",
             path.name,
-            time.size,
+            t.size,
             cfg.min_points_root,
         )
     cache = FitCache()
-    root_fit = compute_unsplit_fit(0, time.size, time, values, cache, cfg)
+    root_fit = compute_unsplit_fit(0, t.size, t, y, cache, cfg)
     if root_fit is None:
         raise RuntimeError(f"Unable to fit baseline model for {path}")
-    root = SegmentNode(node_id="0", start=0, end=time.size, depth=0, fit=root_fit)
+    root = SegmentNode(node_id="0", start=0, end=t.size, depth=0, fit=root_fit)
     candidate_records: List[CandidateRecord] = []
+    candidate_meta_records: List[CandidateMeta] = []
+    lowess_cache: Dict[Tuple[int, int, float], np.ndarray] = {}
     budget = BudgetState()
-    if time.size >= cfg.min_points_root:
-        recurse_node(root, time, values, cache, cfg, path.stem, budget, candidate_records)
+    if t.size >= cfg.min_points_root:
+        recurse_node(
+            root,
+            t,
+            y,
+            cache,
+            cfg,
+            path.stem,
+            budget,
+            candidate_records,
+            candidate_meta_records,
+            lowess_cache,
+            is_probe=False,
+            probe_passes_remaining=cfg.probe_better_child_passes,
+        )
 
     for node in gather_nodes(root):
-        update_node_diagnostics(node, time, values, cfg)
+        update_node_diagnostics(node, t, y, cfg)
 
-    preds, corrected, violations, iso_used = reconstruct_predictions(root, time, values, cfg)
-    rmse_raw = float(np.sqrt(np.mean((preds - values) ** 2)))
-    rmse_corrected = float(np.sqrt(np.mean((corrected - values) ** 2)))
+    preds, corrected, violations, iso_used = reconstruct_predictions(root, t, y, cfg)
+    iso_violations = _count_monotonic_violations(corrected, cfg.monotonic_eps)
+    rmse_raw = float(np.sqrt(np.mean((preds - y) ** 2)))
+    rmse_corrected = float(np.sqrt(np.mean((corrected - y) ** 2)))
     leaves = [node for node in gather_nodes(root) if node.is_leaf()]
     leaf_aicc = sum(leaf.fit.aicc for leaf in leaves)
     delta_total = root.fit.aicc - leaf_aicc
@@ -1668,13 +2161,57 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     correction_mag = float(np.max(np.abs(corrected - preds)))
 
     dataset_outdir = cfg.outdir / path.stem
-    plots = create_plots(dataset_outdir / "plots", path.stem, time, values, preds, corrected, root, cfg)
+    plots = create_plots(dataset_outdir / "plots", path.stem, t, y, preds, corrected, root, cfg)
     candidate_log_path = dataset_outdir / "candidate_log.csv"
     write_candidate_log(candidate_log_path, candidate_records)
+    meta_log_path = dataset_outdir / "candidates_meta.csv"
+    write_candidate_meta_log(meta_log_path, candidate_meta_records)
+
+    leaves_csv_path: Optional[Path] = None
+    if cfg.export_leaves_csv and leaves:
+        leaves_csv_path = dataset_outdir / f"{path.stem}_leaves.csv"
+        leaves_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with leaves_csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "start_idx",
+                    "end_idx",
+                    "t_start",
+                    "t_end",
+                    "family",
+                    "k",
+                    "n",
+                    "b",
+                    "rmse",
+                    "aicc",
+                    "offset",
+                    "right_time_shift_at_boundary",
+                ]
+            )
+            for leaf in leaves:
+                writer.writerow(
+                    [
+                        leaf.start,
+                        leaf.end,
+                        float(t[leaf.start]),
+                        float(t[leaf.end - 1]),
+                        leaf.fit.family,
+                        float(leaf.fit.params.get("k", float("nan"))),
+                        float(leaf.fit.params.get("n", float("nan"))),
+                        float(leaf.fit.params.get("b", 0.0)),
+                        float(leaf.fit.rmse),
+                        float(leaf.fit.aicc),
+                        float(leaf.offset),
+                        float(leaf.right_time_shift_at_boundary),
+                    ]
+                )
 
     config_dict = _config_to_dict(cfg)
     config_digest = hashlib.sha1(json.dumps(config_dict, sort_keys=True).encode("utf-8")).hexdigest()
     version = _get_version()
+    runtime_seconds = timemod.perf_counter() - dataset_start
+    status = "insufficient_points" if t.size < cfg.min_points_root else "ok"
 
     summary = {
         "schema_version": SCHEMA_VERSION,
@@ -1685,9 +2222,14 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
         "seed": cfg.seed,
         "unsplit": root.fit.to_summary(),
         "nodes": [node.to_dict() for node in gather_nodes(root)],
+        "status": status,
+        "dropped_rows": dropped_nonfinite,
+        "runtime_seconds": runtime_seconds,
         "metrics": {
             "sum_gaps": budget.sum_gaps,
             "violations_total": violations,
+            "mono_violations_raw": violations,
+            "mono_violations_iso": iso_violations,
             "delta_AICc_total": delta_total,
             "rel_impr_total": rel_total,
             "correction_magnitude": correction_mag,
@@ -1698,10 +2240,14 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
             "splits_used": budget.splits_used,
             "n_leaves": len(leaves),
             "levels_splits": {str(depth): count for depth, count in budget.levels_splits.items()},
+            "runtime_seconds": runtime_seconds,
         },
         "plots": plots,
         "candidate_log": str(candidate_log_path),
+        "candidate_meta_log": str(meta_log_path),
     }
+    if leaves_csv_path is not None:
+        summary["leaves_csv"] = str(leaves_csv_path)
 
     summary_path = dataset_outdir / "tree_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1737,8 +2283,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=4,
         help="Minimum spacing between consecutive candidate indices before feasibility checks.",
     )
-    parser.add_argument("--lowess-frac-min", type=float, default=0.8, help="Minimum LOWESS fraction for candidates.")
-    parser.add_argument("--lowess-frac-max", type=float, default=0.35, help="Maximum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-min", type=float, default=0.15, help="Minimum LOWESS fraction for candidates.")
+    parser.add_argument("--lowess-frac-max", type=float, default=0.60, help="Maximum LOWESS fraction for candidates.")
     parser.add_argument("--min-fraction", type=float, default=0.05, help="Minimum fractional position for splits.")
     parser.add_argument("--max-fraction", type=float, default=0.95, help="Maximum fractional position for splits.")
     parser.add_argument("--min-rel-improvement", type=float, default=0.001, help="Minimum relative AICc improvement required.")
@@ -1778,12 +2324,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=False,
         help="Reject splits that produce monotonicity violations.",
     )
-    
+    parser.add_argument(
+        "--monotonic-hardcap",
+        type=int,
+        default=0,
+        help="Reject splits automatically when violations exceed this count (0 disables).",
+    )
+
     parser.add_argument(
         "--probe-better-child",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Recurse into the higher-evidence child before probing the other side.",
+    )
+    parser.add_argument(
+        "--probe-better-child-passes",
+        type=int,
+        default=1,
+        help="Additional recursion levels allowed on the prioritized child before probing siblings.",
     )
     parser.add_argument(
         "--lambda-b",
@@ -1792,10 +2350,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Penalty weight applied when |b| exceeds 1e-3 for Midilli segments.",
     )
     parser.add_argument(
+        "--midilli-b-softbound",
+        type=float,
+        default=DEFAULT_MIDILLI_SOFT_BOUND,
+        help="Soft threshold for Midilli b penalty (meters the lambda-b quadratic).",
+    )
+    parser.add_argument(
         "--page-fallback-eps",
         type=float,
         default=0.2,
         help="AICc tolerance for preferring Page when Midilli hits parameter bounds.",
+    )
+    parser.add_argument(
+        "--midbody-aicc-tolerance",
+        type=float,
+        default=0.05,
+        help="If Page and Midilli AICc differ within this tolerance in mid-body segments, prefer Page.",
     )
     parser.add_argument(
         "--monotonic-eps",
@@ -1816,6 +2386,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Only keep isotonic correction if RMSE improves by at least this tolerance.",
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
+    parser.add_argument(
+        "--export-leaves-csv",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Export a CSV summarizing fitted leaf segments.",
+    )
+    parser.add_argument(
+        "--no-plots",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable matplotlib plot generation (useful for headless runs).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse arguments, emit the resolved configuration as JSON, and exit without processing data.",
+    )
     return parser.parse_args(argv)
 
 
@@ -1854,14 +2441,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         seed=args.seed,
         log_level=str(args.log_level),
         probe_better_child=bool(args.probe_better_child),
+        probe_better_child_passes=args.probe_better_child_passes,
         lambda_b=args.lambda_b,
+        midilli_b_softbound=args.midilli_b_softbound,
         page_fallback_eps=args.page_fallback_eps,
+        midbody_aicc_tolerance=args.midbody_aicc_tolerance,
+        monotonic_hardcap=args.monotonic_hardcap,
         monotonic_eps=args.monotonic_eps,
         lowess_points=args.lowess_points,
         iso_rmse_tol=args.iso_rmse_tol,
+        export_leaves_csv=bool(args.export_leaves_csv),
+        no_plots=bool(args.no_plots),
     )
 
+    global _GLOBAL_RNG
+    _GLOBAL_RNG = np.random.default_rng(cfg.seed)
     np.random.seed(cfg.seed)
+
+    if getattr(args, "dry_run", False):
+        print(json.dumps(_config_to_dict(cfg), indent=2))
+        return 0
 
     if not cfg.data_dir.exists():
         raise FileNotFoundError(f"Data directory not found: {cfg.data_dir}")
@@ -1872,15 +2471,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         raise FileNotFoundError(f"No CSV files found in {cfg.data_dir}")
 
     summaries = []
+    total_start = timemod.perf_counter()
     for path in csv_paths:
         logging.info("Processing %s", path.name)
         summary = process_dataset(path, cfg)
         summaries.append(summary)
+    total_runtime = timemod.perf_counter() - total_start
 
     index_payload = {
+        "schema_version": SCHEMA_VERSION,
+        "schema_notes": SCHEMA_NOTES,
         "config": _config_to_dict(cfg),
         "files": [str(path) for path in csv_paths],
         "summaries": summaries,
+        "dataset_runtimes": {
+            summary["file"]: float(summary.get("runtime_seconds", 0.0)) for summary in summaries
+        },
+        "total_runtime_seconds": total_runtime,
     }
     index_path = cfg.outdir / "summary_index.json"
     index_path.write_text(json.dumps(index_payload, indent=2) + "\n")
