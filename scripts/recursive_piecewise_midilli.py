@@ -274,16 +274,16 @@ class CandidateRecord:
 
 class FitCache:
     def __init__(self) -> None:
-        self._cache: Dict[Tuple[str, int, int], FitStats] = {}
+        self._cache: Dict[Tuple[str, int, int, str], FitStats] = {}
 
-    def get(self, family: str, start: int, end: int) -> Optional[FitStats]:
-        return self._cache.get((family, start, end))
+    def get(self, family: str, start: int, end: int, tag: str) -> Optional[FitStats]:
+        return self._cache.get((family, start, end, tag))
 
-    def put(self, family: str, start: int, end: int, stats: FitStats) -> None:
-        self._cache[(family, start, end)] = stats
+    def put(self, family: str, start: int, end: int, tag: str, stats: FitStats) -> None:
+        self._cache[(family, start, end, tag)] = stats
 
-    def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
-        self._cache[(family, start, end)] = stats
+    def store(self, family: str, start: int, end: int, tag: str, stats: FitStats) -> None:
+        self._cache[(family, start, end, tag)] = stats
 
 @dataclass
 class BudgetState:
@@ -482,7 +482,30 @@ def fit_segment(
     max_iter: int,
     bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Optional[FitStats]:
-    cached = cache.get(family, start, end)
+    if family == "Page":
+        tag = "page"
+    elif family == "Midilli":
+        if bounds is None or bounds is MIDILLI_BOUNDS_BODY:
+            tag = "mid_body"
+        elif bounds is MIDILLI_BOUNDS_TAIL:
+            tag = "mid_tail"
+        else:
+            if bounds is not None and all(
+                np.array_equal(b, candidate)
+                for b, candidate in zip(bounds, MIDILLI_BOUNDS_BODY)
+            ):
+                tag = "mid_body"
+            elif bounds is not None and all(
+                np.array_equal(b, candidate)
+                for b, candidate in zip(bounds, MIDILLI_BOUNDS_TAIL)
+            ):
+                tag = "mid_tail"
+            else:
+                raise ValueError("Unrecognized bounds for Midilli fit cache tag")
+    else:
+        raise ValueError(f"Unsupported family '{family}' for fit cache")
+
+    cached = cache.get(family, start, end, tag)
     if cached is not None:
         return cached
 
@@ -494,7 +517,7 @@ def fit_segment(
         use_bounds = bounds if bounds is not None else MIDILLI_BOUNDS_BODY
         stats = _fit_midilli(segment_time, segment_values, max_iter, use_bounds)
     if stats is not None:
-        cache.put(family, start, end, stats)
+        cache.put(family, start, end, tag, stats)
     return stats
 
 
