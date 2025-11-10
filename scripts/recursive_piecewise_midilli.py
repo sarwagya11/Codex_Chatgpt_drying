@@ -104,6 +104,7 @@ class SplitInfo:
     split_time: float
     raw_gap_pre_shift: float
     post_shift_gap: float
+    post_join_gap_adj: float
     slope_gap: float
     penalized_score: float
     time_penalty: float
@@ -119,6 +120,7 @@ class SplitInfo:
     right_reason: str
     b_penalty_left: float
     b_penalty_right: float
+    right_time_shift_attempted: float
 
 
 @dataclass
@@ -170,7 +172,8 @@ class SegmentNode:
             payload.update(
                 {
                     "t_split": float(self.split.split_time),
-                    "post_shift_gap": float(self.split.post_shift_gap),
+                    "post_shift_gap": float(self.split.post_join_gap_adj),
+                    "post_join_gap_adj": float(self.split.post_join_gap_adj),
                     "raw_gap_pre_shift": float(self.split.raw_gap_pre_shift),
                     # Backward compatibility: emit legacy keys for one release.
                     "slope_gap": float(self.split.slope_gap),
@@ -180,6 +183,9 @@ class SegmentNode:
                     "rel_improvement": float(self.split.rel_improvement),
                     "mono_violations": int(self.split.violations),
                     "level_shift_applied": float(self.split.level_shift_applied),
+                    "right_time_shift_attempted": float(
+                        self.split.right_time_shift_attempted
+                    ),
                     "accept_reason": self.split.accept_reason,
                     "score_components": {
                         key: float(value) for key, value in self.split.score_components.items()
@@ -231,6 +237,7 @@ class CandidateRecord:
     rel_improvement: float
     raw_gap_pre_shift: float
     post_shift_gap: float
+    post_join_gap_adj: float
     slope_gap: float
     violations: int
     time_pen: float
@@ -249,6 +256,7 @@ class CandidateRecord:
     reject_reason: str
     accept_reason: str
     tests_fired: List[str]
+    right_time_shift_attempted: float
 
     def to_csv_row(self) -> Dict[str, object]:
         return {
@@ -275,7 +283,7 @@ class CandidateRecord:
             "rel_impr": self.rel_improvement,
             "raw_gap_pre_shift": self.raw_gap_pre_shift,
             "post_shift_gap": self.post_shift_gap,
-          
+            "post_join_gap_adj": self.post_join_gap_adj,
             "slope_gap": self.slope_gap,
             "violations": self.violations,
             "time_pen": self.time_pen,
@@ -294,6 +302,7 @@ class CandidateRecord:
             "reject_reason": self.reject_reason,
             "accept_reason": self.accept_reason,
             "tests_fired_json": json.dumps(self.tests_fired, sort_keys=True),
+            "right_time_shift_attempted": self.right_time_shift_attempted,
         }
 
 
@@ -733,14 +742,30 @@ def _combine_predictions(
     end: int,
     time: np.ndarray,
     level_shift: float = 0.0,
+    right_time_shift: float = 0.0,
 ) -> np.ndarray:
     left_time = time[start : split_idx + 1]
     right_time = time[split_idx + 1 : end]
     left_pred = _segment_base_predictions(left, left_time)
-    right_pred = _segment_base_predictions(right, right_time)
+    right_pred = _segment_base_predictions(right, right_time, right_time_shift)
     if right_pred.size:
         right_pred = right_pred + level_shift
     return np.concatenate([left_pred, right_pred])
+
+
+def _post_join_gap_after_adjustments(
+    left_value: float,
+    left_slope: float,
+    right_fit: FitStats,
+    right_time: float,
+    right_time_shift: float,
+) -> Tuple[float, float, float]:
+    adjusted_time = max(float(right_time + right_time_shift), 1e-8)
+    right_value, right_slope = _model_value_and_slope(right_fit, adjusted_time)
+    level_shift = left_value - right_value
+    post_join_gap = abs(left_value - (right_value + level_shift))
+    slope_gap = abs(left_slope - right_slope)
+    return post_join_gap, slope_gap, level_shift
 
 
 def _count_monotonic_violations(predictions: np.ndarray, eps: float) -> int:
@@ -860,6 +885,7 @@ def score_candidate(
             rel_improvement=float("nan"),
             raw_gap_pre_shift=float("nan"),
             post_shift_gap=float("nan"),
+            post_join_gap_adj=float("nan"),
             slope_gap=float("nan"),
             violations=0,
             time_pen=0.0,
@@ -878,6 +904,7 @@ def score_candidate(
             reject_reason=reason,
             accept_reason=accept_reason,
             tests_fired=tests,
+            right_time_shift_attempted=float("nan"),
         )
         return None, record
 
@@ -893,14 +920,40 @@ def score_candidate(
 
     value_left, slope_left = _model_value_and_slope(left_stats, split_time)
     right_time = float(time[split_idx + 1])
-    value_right, slope_right = _model_value_and_slope(right_stats, right_time)
-    raw_gap_pre_shift = abs(value_left - value_right)
-    level_shift = value_left - value_right
-    post_shift_gap = abs(value_left - (value_right + level_shift))
-    slope_gap = abs(slope_left - slope_right)
+    value_right_raw, slope_right_raw = _model_value_and_slope(right_stats, right_time)
+    raw_gap_pre_shift = abs(value_left - value_right_raw)
+
+    initial_slope_gap = abs(slope_left - slope_right_raw)
+    slope_tol = cfg.max_allowed_slope_gap + cfg.max_allowed_slope_eps
+    max_shift = max(right_time - split_time, 0.0)
+    right_time_shift_attempted = 0.0
+    if (
+        math.isfinite(slope_left)
+        and math.isfinite(slope_right_raw)
+        and initial_slope_gap <= slope_tol
+        and max_shift > 0.0
+        and initial_slope_gap > cfg.max_allowed_slope_eps
+    ):
+        shift = _solve_time_shift_for_slope_match(
+            right_stats, right_time, slope_left, max_shift
+        )
+        if math.isfinite(shift) and shift != 0.0:
+            right_time_shift_attempted = float(np.clip(shift, -max_shift, max_shift))
+
+    post_join_gap_adj, slope_gap, level_shift = _post_join_gap_after_adjustments(
+        value_left, slope_left, right_stats, right_time, right_time_shift_attempted
+    )
+    post_shift_gap = post_join_gap_adj
     time_pen = _time_penalty(split_time, node, time, cfg)
     combined_preds = _combine_predictions(
-        left_stats, right_stats, start, split_idx, end, time, level_shift
+        left_stats,
+        right_stats,
+        start,
+        split_idx,
+        end,
+        time,
+        level_shift,
+        right_time_shift_attempted,
     )
     violations = _count_monotonic_violations(combined_preds, cfg.monotonic_eps)
 
@@ -948,6 +1001,8 @@ def score_candidate(
         "b_pen_left": b_pen_left,
         "b_pen_right": b_pen_right,
         "raw_gap_pre_shift": raw_gap_pre_shift,
+        "post_join_gap_adj": post_join_gap_adj,
+        "right_time_shift_attempted": right_time_shift_attempted,
     }
 
     score = base + gap_pen_component + slope_pen_component
@@ -967,6 +1022,7 @@ def score_candidate(
             split_time,
             raw_gap_pre_shift,
             post_shift_gap,
+            post_join_gap_adj,
             slope_gap,
             score,
             time_pen,
@@ -982,6 +1038,7 @@ def score_candidate(
             right_reason,
             b_pen_left,
             b_pen_right,
+            right_time_shift_attempted,
         )
     else:
         if not tests:
@@ -1011,6 +1068,7 @@ def score_candidate(
         rel_improvement=rel_impr,
         raw_gap_pre_shift=raw_gap_pre_shift,
         post_shift_gap=post_shift_gap,
+        post_join_gap_adj=post_join_gap_adj,
         slope_gap=slope_gap,
         violations=violations,
         time_pen=time_pen,
@@ -1029,6 +1087,7 @@ def score_candidate(
         reject_reason=reason,
         accept_reason=accept_reason,
         tests_fired=tests,
+        right_time_shift_attempted=right_time_shift_attempted,
     )
     return split_info, record
 
@@ -1258,28 +1317,8 @@ def recurse_node(
     if best_info is None:
         return
     node.split = best_info
-    right_time_shift = 0.0
     split_idx = best_info.split_index
-    right_idx = split_idx + 1
-    if right_idx < node.end:
-        left_time = float(time[split_idx])
-        right_time = float(time[right_idx])
-        slope_left = _segment_slope_at(best_info.left, left_time)
-        slope_right = _segment_slope_at(best_info.right, right_time)
-        slope_gap = abs(slope_left - slope_right)
-        slope_tol = cfg.max_allowed_slope_gap + cfg.max_allowed_slope_eps
-        if (
-            math.isfinite(slope_left)
-            and math.isfinite(slope_right)
-            and slope_gap <= slope_tol
-        ):
-            max_shift = max(right_time - left_time, 0.0)
-            if max_shift > 0.0 and slope_gap > cfg.max_allowed_slope_eps:
-                shift = _solve_time_shift_for_slope_match(
-                    best_info.right, right_time, slope_left, max_shift
-                )
-                if shift != 0.0:
-                    right_time_shift = shift
+    right_time_shift = float(best_info.right_time_shift_attempted)
     left_node = SegmentNode(
         node_id=f"{node.node_id}L",
         start=node.start,
@@ -1298,7 +1337,7 @@ def recurse_node(
         right_time_shift_at_boundary=right_time_shift,
     )
     node.children = [left_node, right_node]
-    budget.sum_gaps += best_info.raw_gap_pre_shift
+    budget.sum_gaps += best_info.post_join_gap_adj
     budget.splits_used += 1
     budget.levels_splits[node.depth] = budget.levels_splits.get(node.depth, 0) + 1
     left_node.evidence = compute_child_evidence(left_node, node, time, values, cfg)
@@ -1405,7 +1444,7 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "rel_impr",
         "raw_gap_pre_shift",
         "post_shift_gap",
-       
+        "post_join_gap_adj",
         "slope_gap",
         "violations",
         "time_pen",
@@ -1424,6 +1463,7 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
         "reject_reason",
         "accept_reason",
         "tests_fired_json",
+        "right_time_shift_attempted",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -1435,7 +1475,9 @@ def write_candidate_log(path: Path, records: List[CandidateRecord]) -> None:
 def collect_split_metrics(node: SegmentNode) -> List[Tuple[float, float, float]]:
     splits: List[Tuple[float, float, float]] = []
     if node.split is not None:
-        splits.append((node.split.split_time, node.split.post_shift_gap, node.split.slope_gap))
+        splits.append(
+            (node.split.split_time, node.split.post_join_gap_adj, node.split.slope_gap)
+        )
         for child in node.children:
             splits.extend(collect_split_metrics(child))
     return splits
