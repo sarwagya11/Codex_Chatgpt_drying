@@ -282,6 +282,8 @@ class FitCache:
     def put(self, family: str, start: int, end: int, stats: FitStats) -> None:
         self._cache[(family, start, end)] = stats
 
+    def store(self, family: str, start: int, end: int, stats: FitStats) -> None:
+        self._cache[(family, start, end)] = stats
 
 @dataclass
 class BudgetState:
@@ -1415,7 +1417,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         conflict_handler="resolve",
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
-    parser.add_argument("--outdir", default="outputs", help="Directory to store outputs.")
+    parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
     parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument("--min-points-root", type=int, default=12, help="Minimum points required at the root segment.")
@@ -1439,6 +1441,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-allowed-slope-gap", type=float, default=3e-4, help="Maximum allowed slope discontinuity."
     )
+    parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
+    parser.add_argument("--time-penalty", type=float, default=0.6, help="Penalty weight for split location prior.")
+    parser.add_argument("--lowess-frac-root", type=float, default=0.18, help="LOWESS fraction at the root node.")
+    parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
+    parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
     parser.add_argument(
         "--reject-nonmonotone",
         action=argparse.BooleanOptionalAction,
