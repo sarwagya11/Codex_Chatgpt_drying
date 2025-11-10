@@ -296,7 +296,6 @@ class FitCache:
     def put(self, family: str, start: int, end: int, tag: str, stats: FitStats) -> None:
         self._cache[(family, start, end, tag)] = stats
 
-
 @dataclass
 class BudgetState:
     sum_gaps: float = 0.0
@@ -503,17 +502,19 @@ def fit_segment(
             tag = "mid_tail"
         else:
             if bounds is not None and all(
-                np.array_equal(b, c) for b, c in zip(bounds, MIDILLI_BOUNDS_BODY)
+                np.array_equal(b, candidate)
+                for b, candidate in zip(bounds, MIDILLI_BOUNDS_BODY)
             ):
                 tag = "mid_body"
             elif bounds is not None and all(
-                np.array_equal(b, c) for b, c in zip(bounds, MIDILLI_BOUNDS_TAIL)
+                np.array_equal(b, candidate)
+                for b, candidate in zip(bounds, MIDILLI_BOUNDS_TAIL)
             ):
                 tag = "mid_tail"
             else:
                 raise ValueError("Unrecognized bounds for Midilli fit cache tag")
     else:
-        raise ValueError(f"Unsupported family '{family}'")
+        raise ValueError(f"Unsupported family '{family}' for fit cache")
 
     cached = cache.get(family, start, end, tag)
     if cached is not None:
@@ -559,10 +560,8 @@ def select_best_model(
     if page is None and mid is None:
         return None
     if page is None:
-        assert mid is not None
         return (mid, "midilli_only")
     if mid is None:
-        assert page is not None
         return (page, "page_only")
 
     if is_head and cfg.allow_per_segment_model:
@@ -741,6 +740,7 @@ def _time_penalty(split_time: float, node: SegmentNode, time: np.ndarray, cfg: C
     x = (split_time - t_mid) / scale
     return cfg.time_penalty * (x**2)
 
+
 def _b_penalty(fit: FitStats, cfg: Config) -> float:
     if fit.family != "Midilli" or cfg.lambda_b <= 0:
         return 0.0
@@ -748,6 +748,7 @@ def _b_penalty(fit: FitStats, cfg: Config) -> float:
     if excess <= 0:
         return 0.0
     return cfg.lambda_b * (excess**2)
+
 
 def score_candidate(
     node: SegmentNode,
@@ -875,9 +876,21 @@ def score_candidate(
     b_pen_left = _b_penalty(left_stats, cfg)
     b_pen_right = _b_penalty(right_stats, cfg)
 
-    gap_pen_component = cfg.join_penalty * (raw_gap**2)
-    slope_pen_component = cfg.slope_penalty * (slope_gap**2)
+    gap_pen_component = cfg.join_penalty * (raw_gap**2) if math.isfinite(raw_gap) else float("nan")
+    slope_pen_component = (
+        cfg.slope_penalty * (slope_gap**2) if math.isfinite(slope_gap) else float("nan")
+    )
     mono_pen_component = cfg.shape_penalty_mono * violations
+    score_components = {
+        "base": base,
+        "gap_pen": gap_pen_component,
+        "slope_pen": slope_pen_component,
+        "time_pen": time_pen,
+        "mono_pen": mono_pen_component,
+        "b_pen_left": b_pen_left,
+        "b_pen_right": b_pen_right,
+        "raw_gap": raw_gap,
+    }
 
     score = base + gap_pen_component + slope_pen_component
     score += mono_pen_component + time_pen + b_pen_left + b_pen_right
@@ -900,16 +913,7 @@ def score_candidate(
             score,
             time_pen,
             level_shift,
-            {
-                "base": base,
-                "gap_pen": gap_pen_component,
-                "slope_pen": slope_pen_component,
-                "time_pen": time_pen,
-                "mono_pen": mono_pen_component,
-                "b_pen_left": b_pen_left,
-                "b_pen_right": b_pen_right,
-                "raw_gap": raw_gap,
-            },
+            score_components,
             left_stats,
             right_stats,
             delta_aicc,
@@ -955,13 +959,13 @@ def score_candidate(
         level_shift,
         b_pen_left,
         b_pen_right,
-        base,
-        gap_pen_component,
-        slope_pen_component,
-        mono_pen_component,
-        time_pen,
-        b_pen_left,
-        b_pen_right,
+        score_components["base"],
+        score_components["gap_pen"],
+        score_components["slope_pen"],
+        score_components["mono_pen"],
+        score_components["time_pen"],
+        score_components["b_pen_left"],
+        score_components["b_pen_right"],
         score,
         rejected,
         reason,
@@ -990,24 +994,6 @@ def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
     p_value = math.erfc(abs(z) / math.sqrt(2))
     return float(p_value), float(z)
 
-def _runs_test(residuals: np.ndarray) -> Tuple[float, float]:
-    signs = np.sign(residuals)
-    signs = signs[signs != 0]
-    n = signs.size
-    if n < 2:
-        return float("nan"), float("nan")
-    n_pos = int(np.sum(signs > 0))
-    n_neg = int(np.sum(signs < 0))
-    if n_pos == 0 or n_neg == 0:
-        return 0.0, float("inf")
-    runs = 1 + int(np.sum(signs[:-1] != signs[1:]))
-    expected = (2 * n_pos * n_neg) / n + 1
-    variance = (2 * n_pos * n_neg * (2 * n_pos * n_neg - n_pos - n_neg)) / (n**2 * (n - 1))
-    if variance <= 0:
-        return float("nan"), float("nan")
-    z = (runs - expected) / math.sqrt(variance)
-    p_value = math.erfc(abs(z) / math.sqrt(2))
-    return float(p_value), float(z)
 
 def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
     if residuals.size < 2:
@@ -1015,11 +1001,6 @@ def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: fl
     smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
     return float(np.nanmax(smoothed) - np.nanmin(smoothed))
 
-def _residual_lowess_amplitude(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
-    if residuals.size < 2:
-        return 0.0
-    smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
-    return float(np.nanmax(smoothed) - np.nanmin(smoothed))
 
 def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
     if residuals.size < 3:
@@ -1032,16 +1013,6 @@ def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> f
         return 0.0
     return float(np.nanmax(np.abs(second_diff)))
 
-def _lowess_curvature(time: np.ndarray, residuals: np.ndarray, frac: float) -> float:
-    if residuals.size < 3:
-        return 0.0
-    smoothed = lowess(residuals, time, frac=float(np.clip(frac, 0.01, 0.99)), return_sorted=False)
-    if smoothed.size < 3:
-        return 0.0
-    second_diff = np.diff(smoothed, n=2)
-    if second_diff.size == 0:
-        return 0.0
-    return float(np.nanmax(np.abs(second_diff)))
 
 def _slope_sign_changes(residuals: np.ndarray) -> int:
     if residuals.size < 3:
@@ -1208,24 +1179,32 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
     preds = np.zeros_like(time, dtype=float)
 
     def _assign(segment: SegmentNode) -> None:
-        segment_time = time[segment.start : segment.end]
+        segment_time = time[segment.start:segment.end]
         base = _segment_base_predictions(segment.fit, segment_time)
         if base.size:
             base = base + segment.offset
-        preds[segment.start : segment.end] = base
+        preds[segment.start:segment.end] = base
         for child in segment.children:
             _assign(child)
 
     _assign(node)
+
+    # Count violations on raw preds (for diagnostics)
     violations = _count_monotonic_violations(preds, cfg.monotonic_eps)
+
+    # Enforce nonincreasing MR by clamping, not nudging
     corrected = preds.copy()
-    for idx in range(1, corrected.size):
-        if corrected[idx] > corrected[idx - 1] + cfg.monotonic_eps:
-            corrected[idx] = corrected[idx - 1]
-    for idx in range(corrected.size - 2, -1, -1):
-        if corrected[idx] < corrected[idx + 1] - cfg.monotonic_eps:
-            corrected[idx] = corrected[idx + 1]
+    # forward: remove any local increase
+    for i in range(1, corrected.size):
+        if corrected[i] > corrected[i - 1] + cfg.monotonic_eps:
+            corrected[i] = corrected[i - 1]
+    # backward: clean up any residual rise left by forward pass
+    for i in range(corrected.size - 2, -1, -1):
+        if corrected[i] < corrected[i + 1] - cfg.monotonic_eps:
+            corrected[i] = corrected[i + 1]
+
     return preds, corrected, violations
+
 
 
 def gather_nodes(node: SegmentNode) -> List[SegmentNode]:
@@ -1396,20 +1375,20 @@ CLI_FIELDS = [
     "shape_penalty_mono",
     "max_allowed_gap",
     "max_allowed_slope_gap",
+    "max_allowed_gap_eps",
+    "max_allowed_slope_eps",
     "reject_nonmonotone",
     "total_gap_budget",
     "time_penalty",
     "lowess_frac_root",
+    "monotonic_eps",
+    "alpha_iso",
+    "lowess_points",
     "max_iter",
     "seed",
     "probe_better_child",
     "lambda_b",
     "page_fallback_eps",
-    "max_allowed_gap_eps",
-    "max_allowed_slope_eps",
-    "monotonic_eps",
-    "alpha_iso",
-    "lowess_points",
     "log_level",
 ]
 
@@ -1540,16 +1519,29 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--max-allowed-slope-gap", type=float, default=3e-4, help="Maximum allowed slope discontinuity."
     )
     parser.add_argument(
+        "--max-allowed-gap-eps",
+        type=float,
+        default=1e-12,
+        help="Tolerance added when comparing against the maximum allowed join gap.",
+    )
+    parser.add_argument(
+        "--max-allowed-slope-eps",
+        type=float,
+        default=1e-12,
+        help="Tolerance added when comparing against the maximum allowed slope discontinuity.",
+    )
+    parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
+    parser.add_argument("--time-penalty", type=float, default=0.6, help="Penalty weight for split location prior.")
+    parser.add_argument("--lowess-frac-root", type=float, default=0.18, help="LOWESS fraction at the root node.")
+    parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
+    parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
+    parser.add_argument(
         "--reject-nonmonotone",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Reject splits that produce monotonicity violations.",
     )
-    parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
-    parser.add_argument("--time-penalty", type=float, default=0.5, help="Penalty weight for split location prior.")
-    parser.add_argument("--lowess-frac-root", type=float, default=0.20, help="LOWESS fraction at the root node.")
-    parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
-    parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
+    
     parser.add_argument(
         "--probe-better-child",
         action=argparse.BooleanOptionalAction,
@@ -1569,26 +1561,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="AICc tolerance for preferring Page when Midilli hits parameter bounds.",
     )
     parser.add_argument(
-        "--max-allowed-gap-eps", type=float, default=1e-12, help="Numeric tolerance for gap limit checks."
-    )
- 
-    parser.add_argument(
-        "--max-allowed-slope-eps", type=float, default=1e-12, help="Numeric tolerance for slope limit checks."
-    )
-    parser.add_argument(
-        "--monotonic-eps", type=float, default=5e-6, help="Epsilon used when counting monotonicity violations."
+        "--monotonic-eps",
+        type=float,
+        default=5e-6,
+        help="Numerical tolerance used when checking for monotonicity violations.",
     )
     parser.add_argument(
         "--alpha-iso",
         type=float,
         default=1e-3,
-        help="Step size for optional isotonic-style smoothing of reconstructed predictions.",
+        help="Step size for isotonic adjustment when enforcing monotonicity.",
     )
     parser.add_argument(
         "--lowess-points",
         type=int,
         default=5,
-        help="Number of LOWESS fractions evaluated between min and max when generating candidates.",
+        help="Number of LOWESS fractions evaluated when selecting candidate smoothing levels.",
     )
     parser.add_argument("--log-level", default="INFO", help="Logging level (e.g., INFO, DEBUG).")
     return parser.parse_args(argv)
@@ -1618,6 +1606,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         shape_penalty_mono=args.shape_penalty_mono,
         max_allowed_gap=args.max_allowed_gap,
         max_allowed_slope_gap=args.max_allowed_slope_gap,
+        max_allowed_gap_eps=args.max_allowed_gap_eps,
+        max_allowed_slope_eps=args.max_allowed_slope_eps,
         reject_nonmonotone=bool(args.reject_nonmonotone),
         total_gap_budget=args.total_gap_budget,
         time_penalty=args.time_penalty,
@@ -1628,8 +1618,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         probe_better_child=bool(args.probe_better_child),
         lambda_b=args.lambda_b,
         page_fallback_eps=args.page_fallback_eps,
-        max_allowed_gap_eps=args.max_allowed_gap_eps,
-        max_allowed_slope_eps=args.max_allowed_slope_eps,
         monotonic_eps=args.monotonic_eps,
         alpha_iso=args.alpha_iso,
         lowess_points=args.lowess_points,
