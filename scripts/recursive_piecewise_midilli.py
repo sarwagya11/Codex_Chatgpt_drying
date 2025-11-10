@@ -1413,8 +1413,7 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Recursive piecewise Page/Midilli splitter with continuity penalties.",
-        conflict_handler="resolve",
+        description="Recursive piecewise Page/Midilli splitter with continuity penalties."
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
     parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
