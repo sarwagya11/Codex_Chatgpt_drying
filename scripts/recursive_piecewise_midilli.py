@@ -1139,6 +1139,10 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
         if corrected[idx] > corrected[idx - 1]:
             diff = corrected[idx] - corrected[idx - 1]
             corrected[idx] = corrected[idx - 1] - cfg.alpha_iso * diff
+    for idx in range(corrected.size - 2, -1, -1):
+        if corrected[idx] < corrected[idx + 1]:
+            diff = corrected[idx + 1] - corrected[idx]
+            corrected[idx] = corrected[idx + 1] + cfg.alpha_iso * diff
     return preds, corrected, violations
 
 
