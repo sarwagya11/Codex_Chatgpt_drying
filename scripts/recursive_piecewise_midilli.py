@@ -19,6 +19,12 @@ import numpy as np
 from scipy.optimize import curve_fit
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
+
+def clamp01(value: float) -> float:
+    if math.isfinite(value):
+        return float(np.clip(value, 0.0, 1.0))
+    return 0.0
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SRC_ROOT = _PROJECT_ROOT / "src"
 for candidate in (_PROJECT_ROOT, _SRC_ROOT):
@@ -1107,9 +1113,10 @@ def compute_child_evidence(
     delta = aicc_parent - child.fit.aicc
     runs_p, _ = _runs_test(residuals_child)
     amplitude = _residual_lowess_amplitude(time[child_slice], residuals_child, cfg.lowess_frac_root)
+    sigma = max(float(np.std(residuals_child)), 1e-8)
+    amp_norm = amplitude / sigma
     slope_changes = _slope_sign_changes(residuals_child)
-    runs_component = 1.0 - float(np.clip(runs_p, 0.0, 1.0)) if math.isfinite(runs_p) else 1.0
-    score = float(delta - amplitude - slope_changes - runs_component)
+    score = float(delta - 0.5 * amp_norm - 0.25 * slope_changes - (1.0 - clamp01(runs_p)))
     return Evidence(delta, runs_p, amplitude, slope_changes, score)
 
 
@@ -1304,15 +1311,11 @@ def recurse_node(
     update_node_diagnostics(right_node, time, values, cfg)
 
     if cfg.probe_better_child:
-        def _evidence_key(child: SegmentNode) -> Tuple[float, float, float]:
+        def _evidence_key(child: SegmentNode) -> float:
             ev = child.evidence
             if ev is None:
-                return (float("-inf"), float("-inf"), float("-inf"))
-            return (
-                float(ev.score),
-                float(ev.delta_aicc),
-                -float(ev.residual_amplitude + ev.slope_sign_changes),
-            )
+                return float("-inf")
+            return float(ev.score)
 
         ordered_children = sorted(node.children, key=_evidence_key, reverse=True)
     else:
