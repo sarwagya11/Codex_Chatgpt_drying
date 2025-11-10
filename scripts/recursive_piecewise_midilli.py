@@ -1182,26 +1182,32 @@ def reconstruct_predictions(node: SegmentNode, time: np.ndarray, cfg: Config) ->
     preds = np.zeros_like(time, dtype=float)
 
     def _assign(segment: SegmentNode) -> None:
-        segment_time = time[segment.start : segment.end]
+        segment_time = time[segment.start:segment.end]
         base = _segment_base_predictions(segment.fit, segment_time)
         if base.size:
             base = base + segment.offset
-        preds[segment.start : segment.end] = base
+        preds[segment.start:segment.end] = base
         for child in segment.children:
             _assign(child)
 
     _assign(node)
+
+    # Count violations on raw preds (for diagnostics)
     violations = _count_monotonic_violations(preds, cfg.monotonic_eps)
+
+    # Enforce nonincreasing MR by clamping, not nudging
     corrected = preds.copy()
-    for idx in range(1, corrected.size):
-        if corrected[idx] > corrected[idx - 1]:
-            diff = corrected[idx] - corrected[idx - 1]
-            corrected[idx] = corrected[idx - 1] - cfg.alpha_iso * diff
-    for idx in range(corrected.size - 2, -1, -1):
-        if corrected[idx] < corrected[idx + 1]:
-            diff = corrected[idx + 1] - corrected[idx]
-            corrected[idx] = corrected[idx + 1] + cfg.alpha_iso * diff
+    # forward: remove any local increase
+    for i in range(1, corrected.size):
+        if corrected[i] > corrected[i - 1] + cfg.monotonic_eps:
+            corrected[i] = corrected[i - 1]
+    # backward: clean up any residual rise left by forward pass
+    for i in range(corrected.size - 2, -1, -1):
+        if corrected[i] < corrected[i + 1] - cfg.monotonic_eps:
+            corrected[i] = corrected[i + 1]
+
     return preds, corrected, violations
+
 
 
 def gather_nodes(node: SegmentNode) -> List[SegmentNode]:
@@ -1538,11 +1544,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=True,
         help="Reject splits that produce monotonicity violations.",
     )
-    parser.add_argument("--total-gap-budget", type=float, default=0.01, help="Total allowed sum of join gaps.")
-    parser.add_argument("--time-penalty", type=float, default=0.5, help="Penalty weight for split location prior.")
-    parser.add_argument("--lowess-frac-root", type=float, default=0.20, help="LOWESS fraction at the root node.")
-    parser.add_argument("--max-iter", type=int, default=4000, help="Maximum iterations for curve fitting.")
-    parser.add_argument("--seed", type=int, default=1337, help="Deterministic RNG seed.")
+    
     parser.add_argument(
         "--probe-better-child",
         action=argparse.BooleanOptionalAction,
