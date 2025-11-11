@@ -60,7 +60,10 @@ def detect_critical_moisture(
     acceptance_delta: float = 6.0,
 ) -> Optional[CriticalMoistureResult]:
     """Detect the critical moisture point using a constrained bilinear fit."""
-
+    lowess_frac = float(np.clip(lowess_frac, 0.05, 0.60))
+    lambda_const = float(max(lambda_const, 0.0))
+    acceptance_delta = float(max(acceptance_delta, 0.0))
+    
     time = _as_float_array(time_min)
     values = _as_float_array(x_db)
 
@@ -119,7 +122,7 @@ def detect_critical_moisture(
         return None
 
     best_bic = np.inf
-    best_params: Optional[tuple[int, float, float, float, float, int]] = None
+    best_params: Optional[tuple[int, float, float, float, float]] = None
 
     eps = 1e-12
 
@@ -157,7 +160,7 @@ def detect_critical_moisture(
         except np.linalg.LinAlgError:
             a0, b1, b2 = tuple(np.linalg.pinv(AtA) @ Atb)
 
-        active = [True, True]
+            active = [True, True]
         if b1 < 0:
             b1 = 0.0
             active[0] = False
@@ -165,7 +168,13 @@ def detect_critical_moisture(
             b2 = 0.0
             active[1] = False
 
-        if not all(active):
+        if not active[0] and not active[1]:
+            # both slopes knocked out → constant rate
+            a0 = float(np.mean(b))
+            b1 = 0.0
+            b2 = 0.0
+            p = 1  # intercept only
+        elif not all(active):
             cols = [0]
             if active[0]:
                 cols.append(1)
@@ -173,6 +182,7 @@ def detect_critical_moisture(
                 cols.append(2)
             A_act = A[:, cols]
             AtA = A_act.T @ A_act
+            # ridge only on active slope columns
             if active[0] and active[1]:
                 AtA[1, 1] += lambda_const
                 AtA[2, 2] += lambda_const
@@ -188,10 +198,16 @@ def detect_critical_moisture(
             a0 = float(theta[0])
             if active[0] and active[1]:
                 b1, b2 = float(theta[1]), float(theta[2])
+                p = 3
             elif active[0] and not active[1]:
                 b1, b2 = float(theta[1]), 0.0
+                p = 2
             else:
                 b1, b2 = 0.0, float(theta[1])
+                p = 2
+        else:
+            p = 3  # intercept + two slopes active
+
 
         pred_right = a0 + b1 * u_right
         pred_left = a0 + b2 * u_left
@@ -207,12 +223,12 @@ def detect_critical_moisture(
 
         if bic < best_bic:
             best_bic = bic
-            best_params = (k, a0, b1, b2, Xc, p)
+            best_params = (k, a0, b1, b2, Xc)
 
     if best_params is None:
         return None
 
-    k_star, a0_star, b1_star, b2_star, Xc_star, p_star = best_params
+    k_star, a0_star, b1_star, b2_star, Xc_star = best_params
 
     A_null = np.column_stack([np.ones(m), midpoint_x])
     AtA_null = A_null.T @ A_null
