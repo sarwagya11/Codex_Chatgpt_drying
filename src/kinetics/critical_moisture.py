@@ -119,7 +119,7 @@ def detect_critical_moisture(
         return None
 
     best_bic = np.inf
-    best_params: Optional[tuple[int, float, float, float, float]] = None
+    best_params: Optional[tuple[int, float, float, float, float, int]] = None
 
     eps = 1e-12
 
@@ -131,76 +131,88 @@ def detect_critical_moisture(
         right_mask = ~left_mask
 
         r_left = rate[left_mask]
-        r_right = rate[right_mask]
         u_left = u[left_mask]
+        r_right = rate[right_mask]
         u_right = u[right_mask]
 
         if r_left.size == 0 or r_right.size == 0:
             continue
 
-        n_right = r_right.size
-        n_left = r_left.size
-
         A = np.zeros((m, 3), dtype=float)
         b = np.concatenate([r_right, r_left])
 
+        n_right = r_right.size
         A[:n_right, 0] = 1.0
         A[:n_right, 1] = u_right
-        A[:n_right, 2] = 0.0
         A[n_right:, 0] = 1.0
-        A[n_right:, 1] = 0.0
         A[n_right:, 2] = u_left
 
         AtA = A.T @ A
         Atb = A.T @ b
         AtA[1, 1] += lambda_const
+        AtA[2, 2] += lambda_const
 
         try:
-            params = np.linalg.solve(AtA, Atb)
+            a0, b1, b2 = np.linalg.solve(AtA, Atb)
         except np.linalg.LinAlgError:
-            params = np.linalg.pinv(AtA) @ Atb
+            a0, b1, b2 = tuple(np.linalg.pinv(AtA) @ Atb)
 
-        a0, b1, b2 = params
-
-        if b2 >= 0.0:
+        active = [True, True]
+        if b1 < 0:
+            b1 = 0.0
+            active[0] = False
+        if b2 < 0:
             b2 = 0.0
+            active[1] = False
 
-            A_refit = np.zeros((m, 2), dtype=float)
-            b_refit = np.concatenate([r_right, r_left])
-
-            A_refit[:n_right, 0] = 1.0
-            A_refit[:n_right, 1] = u_right
-            A_refit[n_right:, 0] = 1.0
-            A_refit[n_right:, 1] = 0.0
-
-            AtA_refit = A_refit.T @ A_refit
-            Atb_refit = A_refit.T @ b_refit
-            AtA_refit[1, 1] += lambda_const
-
+        if not all(active):
+            cols = [0]
+            if active[0]:
+                cols.append(1)
+            if active[1]:
+                cols.append(2)
+            A_act = A[:, cols]
+            AtA = A_act.T @ A_act
+            if active[0] and active[1]:
+                AtA[1, 1] += lambda_const
+                AtA[2, 2] += lambda_const
+            elif active[0] and not active[1]:
+                AtA[1, 1] += lambda_const
+            elif active[1] and not active[0]:
+                AtA[1, 1] += lambda_const
+            Atb = A_act.T @ b
             try:
-                a0, b1 = np.linalg.solve(AtA_refit, Atb_refit)
+                theta = np.linalg.solve(AtA, Atb)
             except np.linalg.LinAlgError:
-                a0, b1 = np.linalg.pinv(AtA_refit) @ Atb_refit
+                theta = np.linalg.pinv(AtA) @ Atb
+            a0 = float(theta[0])
+            if active[0] and active[1]:
+                b1, b2 = float(theta[1]), float(theta[2])
+            elif active[0] and not active[1]:
+                b1, b2 = float(theta[1]), 0.0
+            else:
+                b1, b2 = 0.0, float(theta[1])
 
         pred_right = a0 + b1 * u_right
         pred_left = a0 + b2 * u_left
-
-        resid_right = r_right - pred_right
-        resid_left = r_left - pred_left
-
-        rss = np.sum(resid_right ** 2) + np.sum(resid_left ** 2) + lambda_const * (b1 ** 2)
+        resid = np.concatenate([r_right - pred_right, r_left - pred_left])
+        rss = float(
+            np.sum(resid ** 2)
+            + lambda_const * ((b1 if active[0] else 0.0) ** 2 + (b2 if active[1] else 0.0) ** 2)
+        )
         rss = max(rss, eps)
 
-        bic = m * np.log(rss / m) + 3 * np.log(m)
+        p = 1 + int(active[0]) + int(active[1])
+        bic = m * np.log(rss / m) + p * np.log(m)
 
         if bic < best_bic:
             best_bic = bic
-            best_params = (k, a0, b1, b2, Xc)
+            best_params = (k, a0, b1, b2, Xc, p)
 
     if best_params is None:
         return None
 
-    k_star, a0_star, b1_star, b2_star, Xc_star = best_params
+    k_star, a0_star, b1_star, b2_star, Xc_star, p_star = best_params
 
     A_null = np.column_stack([np.ones(m), midpoint_x])
     AtA_null = A_null.T @ A_null
@@ -210,10 +222,10 @@ def detect_critical_moisture(
     try:
         alpha, beta = np.linalg.solve(AtA_null, Atb_null)
     except np.linalg.LinAlgError:
-        alpha, beta = np.linalg.pinv(AtA_null) @ Atb_null
+        alpha, beta = tuple(np.linalg.pinv(AtA_null) @ Atb_null)
 
     resid_null = rate - (alpha + beta * midpoint_x)
-    rss0 = np.sum(resid_null ** 2) + lambda_const * (beta ** 2)
+    rss0 = float(np.sum(resid_null ** 2) + lambda_const * (beta**2))
     rss0 = max(rss0, eps)
     bic0 = m * np.log(rss0 / m) + 2 * np.log(m)
 
