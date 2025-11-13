@@ -107,7 +107,7 @@ def detect_critical_moisture(
     midpoint_x = midpoint_x[pos_mask]
 
     # ---- EARLY-WINDOW GATE (choose an early fraction, e.g., 0.30 = first 30% of run) ----
-    early_frac = 0.40  # adjust once; 0.25–0.35 is typical for end-of-constant-rate
+    early_frac = 0.35  # adjust once; 0.25–0.35 is typical for end-of-constant-rate
     max_t = time[-1] * early_frac
     keep_early = midpoint_time <= max_t
 
