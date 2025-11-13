@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import subprocess
 import sys
 import time as timemod
@@ -41,6 +42,10 @@ plt.switch_backend("Agg")
 
 
 _GLOBAL_RNG: Optional[np.random.Generator] = None
+_TSPLIT_HINTS_MAP: Dict[str, List[float]] = {}
+_TSPLIT_HINT_WINDOW: float = 30.0
+_TSPLIT_DEBUG: bool = False
+_TSPLIT_CURRENT_DATASET: Optional[str] = None
 
 
 @contextmanager
@@ -55,6 +60,26 @@ def _scipy_random_state() -> Iterator[None]:
         yield
     finally:
         np.random.set_state(state)
+
+
+def _load_tsplit_hints(path: str | None) -> Dict[str, List[float]]:
+    if not path:
+        return {}
+    hints: Dict[str, List[float]] = {}
+    with open(path, newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            dataset = (row.get("dataset") or "").strip()
+            if not dataset:
+                continue
+            try:
+                value = float(row.get("t_split", ""))
+            except Exception:
+                continue
+            hints.setdefault(dataset, []).append(value)
+    for key, values in hints.items():
+        hints[key] = sorted(set(values))
+    return hints
 
 
 @dataclass
@@ -750,6 +775,8 @@ def generate_candidates(
     values: np.ndarray,
     cfg: Config,
     lowess_cache: Dict[Tuple[int, int, float], np.ndarray],
+    seed_times: Optional[Sequence[float]] = None,
+    hint_window_mins: float = 30.0,
 ) -> Tuple[List[int], CandidateMeta]:
     start = node.start
     end = node.end
@@ -787,12 +814,38 @@ def generate_candidates(
             candidate = start + idx
             lowess_indices.add(candidate)
     raw_lowess = len(lowess_indices)
-    union_candidates = sorted(grid_indices.union(lowess_indices))
+    candidate_set: set[int] = set(grid_indices)
+    candidate_set.update(lowess_indices)
+    seeded_indices: set[int] = set()
+    if seed_times:
+        mid_times = 0.5 * (segment_time[1:] + segment_time[:-1]) if segment_time.size >= 2 else np.array([])
+        half_window = float(hint_window_mins)
+        if half_window < 0.0:
+            half_window = 0.0
+        if mid_times.size:
+            for ts in seed_times:
+                if ts is None:
+                    continue
+                lo = float(ts) - half_window
+                hi = float(ts) + half_window
+                lo_local = int(np.searchsorted(mid_times, lo, side="left"))
+                hi_local = int(np.searchsorted(mid_times, hi, side="right")) - 1
+                lo_candidate = max(allowed_min, start + lo_local)
+                hi_candidate = min(allowed_max, start + hi_local)
+                if lo_candidate <= hi_candidate:
+                    for idx in range(lo_candidate, hi_candidate + 1):
+                        seeded_indices.add(idx)
+        candidate_set.update(seeded_indices)
+    union_candidates = sorted(candidate_set)
     union_count = len(union_candidates)
     clamped_candidates = sorted({int(np.clip(idx, allowed_min, allowed_max)) for idx in union_candidates})
     min_spacing = max(1, int(cfg.candidate_min_spacing))
     spaced_candidates: List[int] = []
     for candidate in clamped_candidates:
+        if seeded_indices and candidate in seeded_indices:
+            if not spaced_candidates or candidate != spaced_candidates[-1]:
+                spaced_candidates.append(candidate)
+            continue
         if not spaced_candidates or candidate - spaced_candidates[-1] >= min_spacing:
             spaced_candidates.append(candidate)
     spaced_count = len(spaced_candidates)
@@ -816,6 +869,13 @@ def generate_candidates(
             )
             continue
         feasible.append(split_idx)
+    if _TSPLIT_DEBUG and seed_times:
+        seeded_count = sum(1 for idx in feasible if idx in seeded_indices)
+        dataset_key = _TSPLIT_CURRENT_DATASET or ""
+        print(
+            f"[hints] dataset={dataset_key} seeds={list(seed_times)} ±{float(hint_window_mins)} min; "
+            f"seeded_candidates={seeded_count}"
+        )
     meta = CandidateMeta(
         node_id=node.node_id,
         raw_grid=raw_grid,
@@ -1589,6 +1649,8 @@ def recurse_node(
     cache: FitCache,
     cfg: Config,
     dataset_name: str,
+    seed_times: Optional[Sequence[float]],
+    hint_window_mins: float,
     budget: BudgetState,
     candidate_records: List[CandidateRecord],
     candidate_meta: List[CandidateMeta],
@@ -1600,7 +1662,15 @@ def recurse_node(
         return
     if budget.splits_used >= cfg.max_splits:
         return
-    candidates, meta = generate_candidates(node, time, values, cfg, lowess_cache)
+    candidates, meta = generate_candidates(
+        node,
+        time,
+        values,
+        cfg,
+        lowess_cache,
+        seed_times=seed_times,
+        hint_window_mins=hint_window_mins,
+    )
     candidate_meta.append(meta)
     if not candidates:
         return
@@ -1686,6 +1756,8 @@ def recurse_node(
             cache,
             cfg,
             dataset_name,
+            seed_times,
+            hint_window_mins,
             budget,
             candidate_records,
             candidate_meta,
@@ -2104,7 +2176,7 @@ def _get_version() -> Optional[str]:
 
 
 def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
-    global _GLOBAL_RNG
+    global _GLOBAL_RNG, _TSPLIT_CURRENT_DATASET
     if _GLOBAL_RNG is None:
         _GLOBAL_RNG = np.random.default_rng(cfg.seed)
         np.random.seed(cfg.seed)
@@ -2140,21 +2212,31 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     candidate_meta_records: List[CandidateMeta] = []
     lowess_cache: Dict[Tuple[int, int, float], np.ndarray] = {}
     budget = BudgetState()
-    if t.size >= cfg.min_points_root:
-        recurse_node(
-            root,
-            t,
-            y,
-            cache,
-            cfg,
-            path.stem,
-            budget,
-            candidate_records,
-            candidate_meta_records,
-            lowess_cache,
-            is_probe=False,
-            probe_passes_remaining=cfg.probe_better_child_passes,
-        )
+    dataset_key = os.path.basename(path.name)
+    seed_times = _TSPLIT_HINTS_MAP.get(dataset_key, [])
+    hint_window = max(0.0, float(_TSPLIT_HINT_WINDOW))
+    previous_dataset = _TSPLIT_CURRENT_DATASET
+    _TSPLIT_CURRENT_DATASET = dataset_key
+    try:
+        if t.size >= cfg.min_points_root:
+            recurse_node(
+                root,
+                t,
+                y,
+                cache,
+                cfg,
+                path.stem,
+                seed_times,
+                hint_window,
+                budget,
+                candidate_records,
+                candidate_meta_records,
+                lowess_cache,
+                is_probe=False,
+                probe_passes_remaining=cfg.probe_better_child_passes,
+            )
+    finally:
+        _TSPLIT_CURRENT_DATASET = previous_dataset
 
     for node in gather_nodes(root):
         update_node_diagnostics(node, t, y, cfg)
@@ -2271,6 +2353,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
     parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
+    parser.add_argument(
+        "--t-split-hints",
+        type=str,
+        default=None,
+        help="Optional CSV file containing per-dataset split time hints.",
+    )
+    parser.add_argument(
+        "--hint-window-mins",
+        type=float,
+        default=30.0,
+        help="Half-width of the time window (in minutes) applied around hint times.",
+    )
     parser.add_argument("--max-splits", type=int, default=2, help="Maximum number of splits across the tree.")
     parser.add_argument("--max-depth", type=int, default=2, help="Maximum recursion depth (root depth is 0).")
     parser.add_argument(
@@ -2419,6 +2513,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     log_level = getattr(logging, str(args.log_level).upper(), logging.INFO)
     logging.basicConfig(level=log_level, format="%(levelname)s:%(message)s")
+
+    global _TSPLIT_HINTS_MAP, _TSPLIT_HINT_WINDOW, _TSPLIT_DEBUG
+    _TSPLIT_HINTS_MAP = _load_tsplit_hints(getattr(args, "t_split_hints", None))
+    _TSPLIT_HINT_WINDOW = float(getattr(args, "hint_window_mins", 30.0))
+    if _TSPLIT_HINT_WINDOW < 0.0:
+        _TSPLIT_HINT_WINDOW = 0.0
+    _TSPLIT_DEBUG = bool(getattr(args, "debug", False))
 
     cfg = Config(
         data_dir=Path(args.data_dir).expanduser().resolve(),
