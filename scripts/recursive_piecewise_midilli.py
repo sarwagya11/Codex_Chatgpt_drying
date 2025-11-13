@@ -2195,7 +2195,17 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
         np.random.seed(cfg.seed)
 
     logger = logging.getLogger(__name__)
+    stem_lower = path.stem.lower()
+    if stem_lower in {"t_split", "tsplit", "t_split_hints"}:
+        return {
+        "schema_version": SCHEMA_VERSION,
+        "file": str(path),
+        "status": "skipped_non_data",
+        "reason": "tsplit_hints_file",
+        "runtime_seconds": 0.0,
+        }
     dataset_start = timemod.perf_counter()
+
     result = load_and_preprocess(path)
     t = result.time_min.astype(float)
     y = result.mr_iso.astype(float)
@@ -2239,7 +2249,7 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
 
     if _TSPLIT_DEBUG:
         print(f"[hints] {path.name}: seeds={seed_times}  window=±{_TSPLIT_HINT_WINDOW} min")
-        
+
     try:
         if t.size >= cfg.min_points_root:
             recurse_node(
@@ -2536,6 +2546,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    hints_path_resolved = None
+    if getattr(args, "t_split_hints", None):
+        try:
+            hints_path_resolved = Path(args.t_split_hints).expanduser().resolve()
+        except Exception:
+            hints_path_resolved = None
+
     log_level = getattr(logging, str(args.log_level).upper(), logging.INFO)
     logging.basicConfig(level=log_level, format="%(levelname)s:%(message)s")
 
@@ -2602,6 +2619,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cfg.outdir.mkdir(parents=True, exist_ok=True)
 
     csv_paths = sorted(p for p in cfg.data_dir.glob("*.csv") if p.is_file())
+    # ADD (immediately after the line above)
+    if hints_path_resolved is not None:
+        csv_paths = [p for p in csv_paths if p.resolve() != hints_path_resolved]
+    
     if not csv_paths:
         raise FileNotFoundError(f"No CSV files found in {cfg.data_dir}")
 
