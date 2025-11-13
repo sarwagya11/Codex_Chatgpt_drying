@@ -63,22 +63,35 @@ def _scipy_random_state() -> Iterator[None]:
 
 
 def _load_tsplit_hints(path: str | None) -> Dict[str, List[float]]:
+     # add: accept multiple header names and register both stem and name keys
     if not path:
         return {}
     hints: Dict[str, List[float]] = {}
-    with open(path, newline="") as handle:
+    with open(path, newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         for row in reader:
-            dataset = (row.get("dataset") or "").strip()
-            if not dataset:
+            # accept either 'dataset' or 'file'
+            raw_key = (row.get("dataset") or row.get("file") or "").strip()
+            if not raw_key:
                 continue
+            # accept either 't_split' or 't_split_min'
+            val_str = (row.get("t_split") or row.get("t_split_min") or "").strip()
             try:
-                value = float(row.get("t_split", ""))
+                ts = float(val_str)
             except Exception:
                 continue
-            hints.setdefault(dataset, []).append(value)
-    for key, values in hints.items():
-        hints[key] = sorted(set(values))
+            # normalize keys: keep as-is, plus add stem and name.csv forms
+            base = raw_key
+            name = os.path.basename(base)
+            stem, ext = os.path.splitext(name)
+            keys = {base, name, stem, f"{stem}.csv"}
+            for k in keys:
+                if not k:
+                    continue
+                hints.setdefault(k, []).append(ts)
+    # de-dup and sort
+    for k, vals in list(hints.items()):
+        hints[k] = sorted(set(vals))
     return hints
 
 
@@ -2212,11 +2225,21 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     candidate_meta_records: List[CandidateMeta] = []
     lowess_cache: Dict[Tuple[int, int, float], np.ndarray] = {}
     budget = BudgetState()
-    dataset_key = os.path.basename(path.name)
-    seed_times = _TSPLIT_HINTS_MAP.get(dataset_key, [])
+    # change: try name, then stem
+    dataset_key_name = path.name
+    dataset_key_stem = path.stem
+    seed_times = (_TSPLIT_HINTS_MAP.get(dataset_key_name) 
+                or _TSPLIT_HINTS_MAP.get(dataset_key_stem) 
+                or _TSPLIT_HINTS_MAP.get(os.path.basename(dataset_key_name)) 
+                or [])
+
     hint_window = max(0.0, float(_TSPLIT_HINT_WINDOW))
     previous_dataset = _TSPLIT_CURRENT_DATASET
-    _TSPLIT_CURRENT_DATASET = dataset_key
+    _TSPLIT_CURRENT_DATASET = dataset_key_name
+
+    if _TSPLIT_DEBUG:
+        print(f"[hints] {path.name}: seeds={seed_times}  window=±{_TSPLIT_HINT_WINDOW} min")
+        
     try:
         if t.size >= cfg.min_points_root:
             recurse_node(
@@ -2351,6 +2374,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Recursive piecewise Page/Midilli splitter with continuity and monotonicity controls."
     )
+    parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False,
+                    help="Enable extra diagnostics for t-split hints and candidate generation.")
     parser.add_argument("--data-dir", default="data", help="Directory containing input CSV files.")
     parser.add_argument("--outdir", default="outputs/piecewise_recursive", help="Directory to store outputs.")
     parser.add_argument(
