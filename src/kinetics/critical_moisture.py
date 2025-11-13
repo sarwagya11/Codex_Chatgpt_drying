@@ -52,6 +52,7 @@ def detect_critical_moisture(
     lowess_frac: float = 0.15,
     lambda_const: float = 5.0,
     acceptance_delta: float = 6.0,
+    debug: bool = False,
 ) -> Optional[CriticalMoistureResult]:
     """Detect the critical moisture point using a constrained bilinear fit on drying rate."""
     # guards
@@ -68,13 +69,19 @@ def detect_critical_moisture(
     time = time[mask]
     values = values[mask]
     if time.size < 2:
+        if debug: print("[detect] abort: <2 samples after finite filter")
         return None
 
     time, values = _enforce_strictly_increasing(time, values)
     if time.size < 2:
+        if debug: print("[detect] abort: <2 samples after enforcing increasing time")
         return None
 
-    smoothed = lowess(values, time, frac=lowess_frac, return_sorted=False) if (time.size >= 3 and lowess_frac > 0) else values.copy()
+    smoothed = (
+        lowess(values, time, frac=lowess_frac, return_sorted=False)
+        if (time.size >= 3 and lowess_frac > 0)
+        else values.copy()
+    )
 
     dt = np.diff(time)
     if not np.all(dt > 0):
@@ -86,6 +93,7 @@ def detect_critical_moisture(
         smoothed = smoothed[keep]
         dt = np.diff(time)
     if time.size < 2:
+        if debug: print("[detect] abort: <2 samples after dt>0 filter")
         return None
 
     # finite-difference drying rate (positive)
@@ -98,17 +106,29 @@ def detect_critical_moisture(
     midpoint_time = midpoint_time[pos_mask]
     midpoint_x = midpoint_x[pos_mask]
 
+    # ---- EARLY-WINDOW GATE (choose an early fraction, e.g., 0.30 = first 30% of run) ----
+    early_frac = 0.40  # adjust once; 0.25–0.35 is typical for end-of-constant-rate
+    max_t = time[-1] * early_frac
+    keep_early = midpoint_time <= max_t
+
+    rate = rate[keep_early]
+    midpoint_time = midpoint_time[keep_early]
+    midpoint_x = midpoint_x[keep_early]
+
     m = rate.size
     if m == 0:
+        if debug: print("[detect] abort: m=0 after positivity filter")
         return None
 
     min_leaf = max(8, int(np.ceil(0.08 * m)))
     if m < 2 * min_leaf:
+        if debug: print(f"[detect] abort: m={m} < 2*min_leaf={2*min_leaf}")
         return None
 
     start = min_leaf - 1
     stop = m - min_leaf
     if start >= stop:
+        if debug: print(f"[detect] abort: empty candidate window [{start},{stop})")
         return None
 
     best_bic = np.inf
@@ -204,6 +224,7 @@ def detect_critical_moisture(
             best_params = (k, a0, b1, b2, Xc)
 
     if best_params is None:
+        if debug: print("[detect] abort: no solvable candidate produced a finite BIC")
         return None
 
     k_star, a0_star, b1_star, b2_star, Xc_star = best_params
@@ -227,7 +248,17 @@ def detect_critical_moisture(
 
     left_idx = np.arange(0, k_star + 1, dtype=int)
     right_idx = np.arange(k_star + 1, m, dtype=int)
+    if debug:
+        print(f"[detect] m={m}  min_leaf={min_leaf}  cand=[{start},{stop})")
+        print(f"[detect] best t≈{midpoint_time[k_star]:.3f}  Xc≈{Xc_star:.6f}  ΔBIC={delta:.2f}  "
+              f"left={left_idx.size}  right={right_idx.size}")
     if delta < acceptance_delta or left_idx.size < min_leaf or right_idx.size < min_leaf:
+        if debug:
+            reasons = []
+            if delta < acceptance_delta: reasons.append(f"ΔBIC {delta:.2f} < {acceptance_delta:.2f}")
+            if left_idx.size < min_leaf: reasons.append(f"left {left_idx.size} < {min_leaf}")
+            if right_idx.size < min_leaf: reasons.append(f"right {right_idx.size} < {min_leaf}")
+            print("[detect] reject best split: " + " | ".join(reasons))
         return None
 
     t_split = float(midpoint_time[k_star])
