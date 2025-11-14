@@ -230,7 +230,7 @@ def _clip_bounds(value: np.ndarray, lower: float, upper: float) -> np.ndarray:
 
 K_BOUNDS = (1e-6, 1e-1)
 N_BOUNDS = (0.4, 2.2)
-B_BOUNDS = (-0.010, 0.005)
+B_BOUNDS = (-5e-3, 5e-3)
 OFFSET_BOUNDS = (-0.05, 0.05)
 TSHIFT_BOUNDS = (-45.0, 45.0)
 

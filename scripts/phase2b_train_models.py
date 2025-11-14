@@ -73,11 +73,11 @@ class TargetSpec:
 
 TARGET_SPECS: Dict[str, TargetSpec] = {
     "kL": TargetSpec("kL", "log", "k"),
-    "nL": TargetSpec("nL", "log", "n"),
-    "bL": TargetSpec("bL", "identity", "b"),
+    "nL": TargetSpec("nL", "identity", "n"),
+    "bL": TargetSpec("bL", "slog1p", "b"),   # add
     "kR": TargetSpec("kR", "log", "k"),
-    "nR": TargetSpec("nR", "log", "n"),
-    "bR": TargetSpec("bR", "identity", "b"),
+    "nR": TargetSpec("nR", "identity", "n"),
+    "bR": TargetSpec("bR", "slog1p", "b"),   # add
     "offsetR_at_join": TargetSpec("offsetR_at_join", "identity", "offset"),
     "right_time_shift_at_boundary": TargetSpec(
         "right_time_shift_at_boundary", "identity", "tshift"
@@ -96,17 +96,27 @@ GBDT_LEARNING_RATE = [0.03, 0.07, 0.12]
 def _transform_target(values: np.ndarray, spec: TargetSpec) -> np.ndarray:
     if spec.transform == "log":
         return np.log(np.clip(values, 1e-12, None))
+    # CHANGE 2: signed log1p for b
+    if spec.transform == "slog1p":
+        s = np.sign(values)
+        return s * np.log1p(np.abs(values))
     return values
-
 
 def _inverse_target(values: np.ndarray, spec: TargetSpec) -> np.ndarray:
     if spec.transform == "log":
         return np.exp(values)
+    # CHANGE 3: inverse of slog1p
+    if spec.transform == "slog1p":
+        s = np.sign(values)
+        return s * (np.expm1(np.abs(values)))
     return values
 
 
 def _apply_target_bounds(values: np.ndarray, spec: TargetSpec) -> np.ndarray:
-    return apply_bounds(spec.bound_key, values)
+    v = apply_bounds(spec.bound_key, values)
+    if spec.bound_key == "k":
+        v = np.maximum(v, 1e-8)
+    return v
 
 
 def _make_folds(
@@ -165,7 +175,8 @@ def _reconstruct_rmse(
         bool(row.get("famR_is_page", False)),
     )
 
-    rmse = math.sqrt(mean_squared_error(raw_df["mr"].to_numpy(), curves["final"]))
+    mr_obs = (raw_df["mr_iso"] if "mr_iso" in raw_df.columns else raw_df["mr"]).to_numpy()
+    rmse = math.sqrt(mean_squared_error(mr_obs, curves["final"]))
     return rmse
 
 
@@ -315,7 +326,7 @@ def main(argv: List[str] | None = None) -> None:
 
     df = pd.read_csv(targets_csv)
     features = df[BASE_FEATURES].copy()
-
+    cv_folds = min(args.cv_folds, max(2, len(df)))
     folds = list(_make_folds(df, args.cv_folds, args.seed))
     
     if not HAVE_HGB:
@@ -338,7 +349,9 @@ def main(argv: List[str] | None = None) -> None:
             "tshift": list(TSHIFT_BOUNDS),
         },
     }
-
+    # CHANGE 9: record model selection criterion
+    meta["selection_metric"] = "mean_reconstruction_RMSE (lower is better); tie-breaker: parameter_RMSE"
+    
     for target in TARGET_COLUMNS:
         spec = TARGET_SPECS[target]
         best_family = None
