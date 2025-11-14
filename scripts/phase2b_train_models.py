@@ -153,7 +153,7 @@ def _reconstruct_rmse(
         if value is None:
             value = row[key]
         if pd.isna(value):
-            return float("nan")
+             raise ValueError(f"Missing target '{key}' for dataset {dataset}")
         return float(value)
 
     t_split = float(row["tR_start"])
@@ -333,7 +333,7 @@ def main(argv: List[str] | None = None) -> None:
     df = pd.read_csv(targets_csv)
     features = df[BASE_FEATURES].copy()
     cv_folds = min(args.cv_folds, max(2, len(df)))
-    folds = list(_make_folds(df, args.cv_folds, args.seed))
+    folds = list(_make_folds(df, cv_folds, args.seed))
     
     if not HAVE_HGB:
         LOGGER.warning("HistGradientBoostingRegressor unavailable; skipping GBDT candidates")

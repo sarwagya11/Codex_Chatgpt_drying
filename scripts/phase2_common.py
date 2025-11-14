@@ -186,29 +186,69 @@ def parse_dataset_stem(stem: str) -> Dict[str, Any]:
 REQUIRED_RAW_COLUMNS = ("time_min", "mr")
 
 
-def load_raw_timeseries(raw_dir: Path, stem: str) -> pd.DataFrame:
-    """Load the observed MR curve for ``stem``.
-
-    Parameters
-    ----------
-    raw_dir:
-        Directory containing ``<stem>.csv`` files.
-    stem:
-        Dataset identifier (without extension).
-    """
-
-    csv_path = raw_dir / f"{stem}.csv"
+def load_raw_timeseries(raw_root: Path, dataset_stem: str) -> pd.DataFrame:
+    """Load one raw timeseries and return columns: time_min, mr_iso, mr."""
+    csv_path = (raw_root / f"{dataset_stem}.csv")
     if not csv_path.exists():
-        raise FileNotFoundError(f"Raw data CSV not found: {csv_path}")
+        raise FileNotFoundError(f"Raw CSV not found: {csv_path}")
 
     df = pd.read_csv(csv_path)
-    missing = [col for col in REQUIRED_RAW_COLUMNS if col not in df.columns]
-    if missing:
-        raise ValueError(
-            f"Raw CSV {csv_path} missing required columns: {', '.join(missing)}"
-        )
 
-    return df[list(REQUIRED_RAW_COLUMNS)].copy()
+    # --- time column ---
+    time_cols = ["time_min", "t_min", "time", "t", "minutes"]
+    time_col = next((c for c in time_cols if c in df.columns), None)
+    if time_col is None:
+        raise ValueError(
+            f"Raw {csv_path} missing a time column; "
+            f"expected one of {time_cols}"
+        )
+    df = df.rename(columns={time_col: "time_min"})
+    df["time_min"] = pd.to_numeric(df["time_min"], errors="coerce")
+
+    # --- MR column(s) ---
+    # If MR already present, keep it.
+    if "mr_iso" in df.columns or "mr" in df.columns:
+        mr = df["mr_iso"] if "mr_iso" in df.columns else df["mr"]
+        mr = pd.to_numeric(mr, errors="coerce")
+        df["mr_iso"] = mr
+        df["mr"] = mr
+    else:
+        # Build MR from dry-basis moisture content if available
+        x_cols = ["xdb", "Xdb", "moisture_db", "X_db", "X"]
+        x_col = next((c for c in x_cols if c in df.columns), None)
+        if x_col is None:
+            raise ValueError(
+                f"Raw {csv_path} missing required columns: mr/mr_iso or any of {x_cols}"
+            )
+
+        X = pd.to_numeric(df[x_col], errors="coerce")
+
+        # Allow optional provided X0/Xeq; otherwise infer sensible defaults
+        X0 = (pd.to_numeric(df["X0_db"], errors="coerce").iloc[0]
+              if "X0_db" in df.columns else float(X.iloc[0]))
+        # Prefer explicit Xeq if present; else use 0.0 (standard when equilibrium is dry)
+        Xeq = (pd.to_numeric(df["Xeq_db"], errors="coerce").iloc[0]
+               if "Xeq_db" in df.columns else 0.0)
+
+        denom = max(1e-12, (X0 - Xeq))
+        mr = (X - Xeq) / denom
+        mr = mr.astype(float).clip(lower=0.0)  # avoid negative MR
+        df["mr_iso"] = mr
+        df["mr"] = mr
+
+    # Final sanity
+    need = ["time_min", "mr_iso", "mr"]
+    if not all(c in df.columns for c in need):
+        missing = [c for c in need if c not in df.columns]
+        raise ValueError(f"Raw {csv_path} missing required columns after normalization: {missing}")
+
+    # Drop non-finite
+    df = df[np.isfinite(df["time_min"]) & np.isfinite(df["mr_iso"])]
+    if df.empty:
+        raise ValueError(f"Raw {csv_path} became empty after filtering non-finite entries.")
+
+    return df[["time_min", "mr_iso", "mr"]].reset_index(drop=True)
+
 
 
 # ---------------------------------------------------------------------------
