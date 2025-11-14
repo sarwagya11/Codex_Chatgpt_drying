@@ -148,21 +148,27 @@ def _reconstruct_rmse(
         LOGGER.warning("Raw dataset %s missing; skipping RMSE computation", dataset)
         return None
 
+    def _pick_value(key: str) -> float:
+        value = predicted.get(key)
+        if value is None:
+            value = row[key]
+        if pd.isna(value):
+            return float("nan")
+        return float(value)
+
     t_split = float(row["tR_start"])
     left_params = {
-        "k": predicted.get("kL", row["kL"]),
-        "n": predicted.get("nL", row["nL"]),
-        "b": predicted.get("bL", row["bL"]),
+        "k": _pick_value("kL"),
+        "n": _pick_value("nL"),
+        "b": _pick_value("bL"),
     }
     right_params = {
-        "k": predicted.get("kR", row["kR"]),
-        "n": predicted.get("nR", row["nR"]),
-        "b": predicted.get("bR", row["bR"]),
+        "k": _pick_value("kR"),
+        "n": _pick_value("nR"),
+        "b": _pick_value("bR"),
     }
-    offsetR = predicted.get("offsetR_at_join", row["offsetR_at_join"])
-    tshift = predicted.get(
-        "right_time_shift_at_boundary", row["right_time_shift_at_boundary"]
-    )
+    offsetR = _pick_value("offsetR_at_join")
+    tshift = _pick_value("right_time_shift_at_boundary")
 
     curves = reconstruct_piecewise(
         raw_df["time_min"].to_numpy(),
