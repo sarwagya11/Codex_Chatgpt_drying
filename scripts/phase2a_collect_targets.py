@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List
 import numpy as np
 import pandas as pd
 
-from .phase2_common import parse_dataset_stem, write_run_meta
+from .phase2_common import _midilli_curve, parse_dataset_stem, write_run_meta
 
 
 LOGGER = logging.getLogger("phase2.targets")
@@ -71,7 +71,17 @@ def _extract_value(series: pd.Series, candidates: Iterable[str], default: Any = 
     return default
 
 
-def collect_targets(phase1_root: Path) -> pd.DataFrame:
+def _align_boundary(left_params, right_params, t_join, is_page_L, is_page_R):
+    # Evaluate left at absolute t_join. Evaluate right at local right_t = tshift (start=0).
+    yL = _midilli_curve(np.array([t_join]), left_params["k"], left_params["n"], left_params["b"], is_page_L)[0]
+    # Default tshift=0 to define 'meeting place'; user can later train tshift ≠ 0
+    tshift = 0.0
+    yR = _midilli_curve(np.array([tshift]), right_params["k"], right_params["n"], right_params["b"], is_page_R)[0]
+    offset = float(yL - yR)
+    return offset, tshift
+
+
+def collect_targets(phase1_root: Path, args: argparse.Namespace | None = None) -> pd.DataFrame:
     records: List[Dict[str, Any]] = []
 
     for dataset_dir in sorted(p for p in phase1_root.iterdir() if p.is_dir()):
@@ -160,6 +170,17 @@ def collect_targets(phase1_root: Path) -> pd.DataFrame:
             "famR_is_page": bool(famR_is_page),
         }
 
+        if args and getattr(args, "recompute_boundary", False):
+            off, tsh = _align_boundary(
+                left_params={"k": record["kL"], "n": record["nL"], "b": record["bL"]},
+                right_params={"k": record["kR"], "n": record["nR"], "b": record["bR"]},
+                t_join=record["tL_end"],
+                is_page_L=record["famL_is_page"],
+                is_page_R=record["famR_is_page"],
+            )
+            record["offsetR_at_join"] = float(off)
+            record["right_time_shift_at_boundary"] = float(tsh)
+
         records.append(record)
 
     df = pd.DataFrame.from_records(records, columns=OUTPUT_COLUMNS)
@@ -171,6 +192,11 @@ def main(argv: List[str] | None = None) -> None:
     parser.add_argument("--phase1-root", type=Path, default=DEFAULT_PHASE1_ROOT)
     parser.add_argument("--out-csv", type=Path, default=DEFAULT_OUT_CSV)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--recompute-boundary",
+        action="store_true",
+        help="Ignore stored offsets/tshift and recompute to make right meet left at join.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -182,9 +208,13 @@ def main(argv: List[str] | None = None) -> None:
     if not phase1_root.exists():
         raise FileNotFoundError(f"Phase-1 root does not exist: {phase1_root}")
 
-    df = collect_targets(phase1_root)
+    df = collect_targets(phase1_root, args)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_csv, index=False)
+
+    df[["dataset", "tL_end", "offsetR_at_join", "right_time_shift_at_boundary"]].to_csv(
+        out_csv.parent / "phase2_targets_align_debug.csv", index=False
+    )
 
     write_run_meta(out_csv.parent, sys_argv())
 
