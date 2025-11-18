@@ -302,6 +302,7 @@ def reconstruct_piecewise(
     tshift_right: float,
     is_page_left: bool,
     is_page_right: bool,
+    mr_floor: float = 0.0
 ) -> Dict[str, np.ndarray]:
     """Rebuild a piecewise Midilli/Page curve with continuity guards.
 
@@ -314,7 +315,8 @@ def reconstruct_piecewise(
         raise ValueError("time_min must be one-dimensional")
 
     left_t = np.clip(time_arr, a_min=0.0, a_max=None)
-    right_t = np.clip(time_arr - t_split + tshift_right, a_min=0.0, a_max=None)
+    right_t = np.clip((time_arr + tshift_right), a_min=0.0, a_max=None)
+    
 
     kL = float(left_params["k"])
     nL = float(left_params["n"])
@@ -325,19 +327,28 @@ def reconstruct_piecewise(
 
     left_curve = _midilli_curve(left_t, kL, nL, bL, is_page_left)
     right_raw = _midilli_curve(right_t, kR, nR, bR, is_page_right)
+    
+    right_raw = _clip_bounds(right_raw, 0.0, 1.05)
     right_shifted = right_raw + offset_right
+
+    # Enforce monotonic non-increase on each side separately
+    left_curve  = np.minimum.accumulate(left_curve)
+    right_shifted = np.minimum.accumulate(right_shifted)
 
     final = left_curve.copy()
     right_mask = time_arr >= t_split
     if right_mask.any():
         join_idx = np.searchsorted(time_arr, t_split, side="left")
-        join_value = left_curve[join_idx - 1] if join_idx > 0 else left_curve[0]
+        join_value = left_curve[join_idx] if join_idx < len(left_curve) else left_curve[-1]
         guarded_right = right_shifted[right_mask]
         guarded_right = np.minimum(guarded_right, join_value)
         guarded_right = np.minimum.accumulate(guarded_right)
         final[right_mask] = guarded_right
 
-    final = np.maximum(final, 0.0)
+    final        = _clip_bounds(final,        mr_floor, 1.05)
+    left_curve   = _clip_bounds(left_curve,   mr_floor, 1.05)
+    right_raw    = _clip_bounds(right_raw,    mr_floor, 1.05)
+    right_shifted= _clip_bounds(right_shifted,mr_floor, 1.05)
 
     return {
         "time": time_arr,

@@ -23,45 +23,31 @@ from .phase2_common import (
     write_run_meta,
 )
 
-
 LOGGER = logging.getLogger("phase2.predict")
 
-
 DEFAULT_MODELS_DIR = Path(r"D:\Masters\RQ5\Codex_Chatgpt_drying\outputs\phase2\models")
-DEFAULT_OUT_DIR = Path(r"D:\Masters\RQ5\Codex_Chatgpt_drying\outputs\phase2\predict_demo")
-
+DEFAULT_OUT_DIR    = Path(r"D:\Masters\RQ5\Codex_Chatgpt_drying\outputs\phase2\predict_demo")
 
 TARGET_ORDER = [
-    "kL",
-    "nL",
-    "bL",
-    "kR",
-    "nR",
-    "bR",
-    "offsetR_at_join",
-    "right_time_shift_at_boundary",
+    "kL","nL","bL",
+    "kR","nR","bR",
+    "offsetR_at_join","right_time_shift_at_boundary",
 ]
 
-
-TRANSFORMS = {
-    "kL": "log",
-    "nL": "log",
-    "bL": "identity",
-    "kR": "log",
-    "nR": "log",
-    "bR": "identity",
-    "offsetR_at_join": "identity",
-    "right_time_shift_at_boundary": "identity",
-}
-
-
+# ---------- helpers: use Phase-2B’s recorded transforms ----------
 def _inverse(values: np.ndarray, transform: str) -> np.ndarray:
     if transform == "log":
         return np.exp(values)
-    return values
+    if transform == "slog1p":
+        s = np.sign(values)
+        return s * (np.expm1(np.abs(values)))
+    return values  # identity
 
+def _get_transform(meta: Dict[str, Any], target: str) -> str:
+    # Phase-2B wrote this map in meta["transforms"]
+    return meta.get("transforms", {}).get(target, "identity")
 
-def _apply_bounds(name: str, values: np.ndarray) -> np.ndarray:
+def _apply_bounds_for(name: str, values: np.ndarray) -> np.ndarray:
     if name.startswith("k"):
         return apply_bounds("k", values)
     if name.startswith("n"):
@@ -73,7 +59,7 @@ def _apply_bounds(name: str, values: np.ndarray) -> np.ndarray:
     if name == "right_time_shift_at_boundary":
         return apply_bounds("tshift", values)
     return values
-
+# -----------------------------------------------------------------
 
 def parse_time_grid(spec: str) -> np.ndarray:
     parts = spec.split(":")
@@ -85,30 +71,24 @@ def parse_time_grid(spec: str) -> np.ndarray:
     count = int(np.floor((end - start) / step)) + 1
     return start + step * np.arange(count)
 
-
 def load_models(models_dir: Path):
     meta = json.loads((models_dir / "meta.json").read_text())
     preprocessor = joblib.load(models_dir / "preprocessor.joblib")
 
     models = {}
-    for target in TARGET_ORDER:
-        filename = {
-            "kL": "kL.joblib",
-            "nL": "nL.joblib",
-            "bL": "bL.joblib",
-            "kR": "kR.joblib",
-            "nR": "nR.joblib",
-            "bR": "bR.joblib",
-            "offsetR_at_join": "offsetR.joblib",
-            "right_time_shift_at_boundary": "join_tshift.joblib",
-        }[target]
-        model_path = models_dir / filename
-        if not model_path.exists():
-            raise FileNotFoundError(f"Missing model artifact: {model_path}")
-        models[target] = joblib.load(model_path)
+    filenames = {
+        "kL":"kL.joblib","nL":"nL.joblib","bL":"bL.joblib",
+        "kR":"kR.joblib","nR":"nR.joblib","bR":"bR.joblib",
+        "offsetR_at_join":"offsetR.joblib",
+        "right_time_shift_at_boundary":"join_tshift.joblib",
+    }
+    for target, fname in filenames.items():
+        path = models_dir / fname
+        if not path.exists():
+            raise FileNotFoundError(f"Missing model artifact: {path}")
+        models[target] = joblib.load(path)
 
     return meta, preprocessor, models
-
 
 def predict_for_row(
     row: pd.Series,
@@ -116,113 +96,120 @@ def predict_for_row(
     models: Dict[str, Any],
     meta: Dict[str, Any],
 ) -> Dict[str, float]:
-    features_df = pd.DataFrame([
-        {
-            "T_C": row["T_C"],
-            "RH_mid_pct": row["RH_mid_pct"],
-            "v_ms": row["v_ms"],
-            "thickness_mm": row["thickness_mm"],
-        }
-    ])
+    features_df = pd.DataFrame([{
+        "T_C": row["T_C"],
+        "RH_mid_pct": row["RH_mid_pct"],
+        "v_ms": row["v_ms"],
+        "thickness_mm": row["thickness_mm"],
+    }])
     processed = preprocessor.transform(features_df)
 
     outputs: Dict[str, float] = {}
     for target in TARGET_ORDER:
-        family = meta["targets"].get(target, {}).get("family", "elasticnet")
-        transform = TRANSFORMS[target]
-        if family == "elasticnet":
-            design = build_elasticnet_design(processed)
-        else:
-            design = build_gbdt_matrix(processed)
-        model = models[target]
-        pred_trans = model.predict(design)
-        pred = _inverse(np.asarray(pred_trans), transform)
-        pred = _apply_bounds(target, pred)
+        family    = meta["targets"].get(target, {}).get("family", "elasticnet")
+        transform = _get_transform(meta, target)
+        design = (build_elasticnet_design(processed)
+                  if family == "elasticnet" else
+                  build_gbdt_matrix(processed))
+        pred_trans = models[target].predict(design)
+        pred = _inverse(np.asarray(pred_trans, dtype=float), transform)
+        pred = _apply_bounds_for(target, pred)
         outputs[target] = float(pred[0])
-
     return outputs
-
 
 def main(argv: List[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run Phase-2 continuity-aware predictor")
+    parser.add_argument("--t-source", choices=["tL_end","t_split_min"], default="tL_end")
+    parser.add_argument("--auto-page-eps", type=float, default=1e-6,
+                        help="If |b| ≤ eps on a side, force Page (b=0, is_page=True).")
+    parser.add_argument("--mr-floor", type=float, default=0.03)
     parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     parser.add_argument("--operating-point-csv", type=Path)
     parser.add_argument("--time-grid", type=str, default="0:600:1")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--log-level", default="INFO")
-
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
-    models_dir: Path = args.models_dir
-    ops_csv: Path = args.operating_point_csv
-    out_dir: Path = args.out_dir
+    if not args.models_dir.exists():
+        raise FileNotFoundError(f"Models directory does not exist: {args.models_dir}")
+    if not args.operating_point_csv.exists():
+        raise FileNotFoundError(f"Operating point CSV not found: {args.operating_point_csv}")
 
-    if not models_dir.exists():
-        raise FileNotFoundError(f"Models directory does not exist: {models_dir}")
-    if not ops_csv.exists():
-        raise FileNotFoundError(f"Operating point CSV not found: {ops_csv}")
+    meta, preproc, models = load_models(args.models_dir)
+    
 
-    meta, preprocessor, models = load_models(models_dir)
     time_grid = parse_time_grid(args.time_grid)
-
-    ops_df = pd.read_csv(ops_csv)
-    required_cols = {"id", "T_C", "RH_mid_pct", "v_ms", "thickness_mm", "t_split_min"}
-    missing = required_cols - set(ops_df.columns)
+    ops_df = pd.read_csv(args.operating_point_csv)
+    base_cols = {"id","T_C","RH_mid_pct","v_ms","thickness_mm"}
+    join_col  = "tL_end" if args.t_source == "tL_end" else "t_split_min"
+    missing = (base_cols | {join_col}) - set(ops_df.columns)
     if missing:
         raise ValueError(f"Operating point CSV missing columns: {', '.join(sorted(missing))}")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for _, row in ops_df.iterrows():
-        identifier = row["id"]
-        predictions = predict_for_row(row, preprocessor, models, meta)
+        identifier  = row["id"]
+        predictions = predict_for_row(row, preproc, models, meta)
+
+        # Decide Page vs Midilli per side
+        bL = float(predictions["bL"]); bR = float(predictions["bR"])
+        is_page_L = bool(row.get("famL_is_page", False))
+        is_page_R = bool(row.get("famR_is_page", False))
+
+        if abs(bL) <= args.auto_page_eps:
+            bL = 0.0; is_page_L = True
+        if abs(bR) <= args.auto_page_eps:
+            bR = 0.0; is_page_R = True
+
+        t_split = float(row[join_col])
 
         curves = reconstruct_piecewise(
             time_grid,
-            {"k": predictions["kL"], "n": predictions["nL"], "b": predictions["bL"]},
-            {"k": predictions["kR"], "n": predictions["nR"], "b": predictions["bR"]},
-            float(row["t_split_min"]),
-            predictions["offsetR_at_join"],
-            predictions["right_time_shift_at_boundary"],
-            False,
-            False,
+            {"k": float(predictions["kL"]), "n": float(predictions["nL"]), "b": bL},
+            {"k": float(predictions["kR"]), "n": float(predictions["nR"]), "b": bR},
+            t_split,
+            float(predictions["offsetR_at_join"]),
+            float(predictions["right_time_shift_at_boundary"]),
+            is_page_left=is_page_L,
+            is_page_right=is_page_R,
+            mr_floor=float(args.mr_floor),
         )
+        MR_pred_noguard = np.where(time_grid <= t_split,
+                                   curves["left"],
+                                   curves["right_shifted"])
+        
+        segment = np.where(time_grid <= t_split, "left", "right")
+        df = pd.DataFrame({
+            "id": identifier,
+            "t": curves["time"],
+            "MR_pred": curves["final"],
+            "segment": segment,
+            "MR_L": curves["left"],
+            "MR_R_raw": curves["right_raw"],
+            "MR_R_shifted": curves["right_shifted"],
+            "offsetR": predictions["offsetR_at_join"],
+            "tshift": predictions["right_time_shift_at_boundary"],
+        })
+        df.to_csv(args.out_dir / f"{identifier}_prediction.csv", index=False)
 
-        segment = np.where(time_grid <= row["t_split_min"], "left", "right")
-        df = pd.DataFrame(
-            {
-                "id": identifier,
-                "t": curves["time"],
-                "MR_pred": curves["final"],
-                "segment": segment,
-                "MR_L": curves["left"],
-                "MR_R_raw": curves["right_raw"],
-                "MR_R_shifted": curves["right_shifted"],
-                "offsetR": predictions["offsetR_at_join"],
-                "tshift": predictions["right_time_shift_at_boundary"],
-            }
-        )
-
-        csv_path = out_dir / f"{identifier}_prediction.csv"
-        df.to_csv(csv_path, index=False)
-
+        # Plot
         plt.figure(figsize=(8, 4.5))
-        plt.plot(curves["time"], curves["left"], label="MR_L", linestyle="--")
-        plt.plot(curves["time"], curves["right_raw"], label="MR_R_raw", linestyle=":")
-        plt.plot(curves["time"], curves["right_shifted"], label="MR_R_shifted", linestyle="-")
-        plt.plot(curves["time"], curves["final"], label="MR_pred", linewidth=2)
-        plt.axvline(float(row["t_split_min"]), color="black", linestyle="--", alpha=0.5)
-        plt.xlabel("Time (min)")
-        plt.ylabel("MR")
-        plt.title(f"Phase-2 prediction for {identifier}")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(out_dir / f"{identifier}_prediction.png", dpi=150)
+        plt.plot(curves["time"], curves["left"],         label="MR_L",         linestyle="--")
+        plt.plot(curves["time"], curves["right_raw"],    label="MR_R_raw",     linestyle=":")
+        plt.plot(curves["time"], curves["right_shifted"],label="MR_R_shifted", linestyle="-")
+        plt.plot(curves["time"], curves["final"],        label="MR_pred",      linewidth=2)
+        
+        plt.xlabel("Time (min)"); plt.ylabel("MR"); plt.title(f"Phase-2 prediction for {identifier}")
+        join_idx = np.searchsorted(time_grid, t_split, side="left")
+        plt.scatter([t_split], [curves["left"][join_idx]],          s=20, label="Join target (left)")
+        plt.scatter([t_split], [curves["right_shifted"][join_idx]], s=30, marker="x",
+                    label="Right@join after shift")
+        plt.legend(); plt.tight_layout()
+        plt.savefig(args.out_dir / f"{identifier}_prediction.png", dpi=150)
         plt.close()
 
-    write_run_meta(out_dir, list(sys.argv))
-
+    write_run_meta(args.out_dir, list(sys.argv))
 
 if __name__ == "__main__":
     main()
-

@@ -58,7 +58,6 @@ OUTPUT_COLUMNS = [
     "famR_is_page",
 ]
 
-
 def _find_leaves_csv(folder: Path) -> Path | None:
     for csv_path in folder.glob("*_leaves.csv"):
         return csv_path

@@ -179,6 +179,7 @@ def _reconstruct_rmse(
         tshift,
         bool(row.get("famL_is_page", False)),
         bool(row.get("famR_is_page", False)),
+        mr_floor=0.0,
     )
 
     mr_obs = (raw_df["mr_iso"] if "mr_iso" in raw_df.columns else raw_df["mr"]).to_numpy()
