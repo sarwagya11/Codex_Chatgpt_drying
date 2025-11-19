@@ -23,6 +23,7 @@ from .phase2_common import (
     build_elasticnet_design,
     build_gbdt_matrix,
     reconstruct_piecewise,
+    solve_tshift_for_target_mr,
     write_run_meta,
 )
 
@@ -135,8 +136,11 @@ def main(argv: List[str] | None = None) -> None:
         default=1e-6,
         help="If |b| ≤ eps on a side, force Page (b=0, is_page=True).",
     )
-    parser.add_argument("--force-continuity", action="store_true",
-                        help="Solve tshift so MR_right(t_split)=MR_left(t_split); offset≈0")
+    parser.add_argument(
+        "--force-continuity",
+        action="store_true",
+        help="Also solve a continuity-respecting tshift (offset≈0) and plot both runs",
+    )
     parser.add_argument("--mr-floor", type=float, default=0.03)
     parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
     parser.add_argument("--operating-point-csv", type=Path)
@@ -186,100 +190,63 @@ def main(argv: List[str] | None = None) -> None:
         if is_page_R:
             bR = 0.0
 
-        offsetR = float(predictions["offsetR_at_join"])
-        tshift = float(predictions["right_time_shift_at_boundary"])
-
-        if args.force_continuity:
-            mr_target = float(_midilli_curve(np.array([t_split]), kL, nL, bL, is_page_L)[0])
-            lo, hi = 0.0, TSHIFT_BOUNDS[1]
-            for _ in range(60):
-                mid = 0.5 * (lo + hi)
-                mr_mid = float(_midilli_curve(np.array([mid]), kR, nR, bR, is_page_R)[0])
-                if mr_mid > mr_target:
-                    lo = mid
-                else:
-                    hi = mid
-            tshift = float(hi)
-            offsetR = 0.0
-
-        tshift_used = float(np.clip(tshift, *TSHIFT_BOUNDS))
-
-        mr_left_at_join = float(
-            _midilli_curve(
-                np.array([t_split]),
-                kL,
-                nL,
-                float(bL),
-                is_page_L,
-            )[0]
-        )
-
-        mr_right_raw_at_join = float(
-            _midilli_curve(
-                np.array([tshift_used]),
-                kR,
-                nR,
-                float(bR),
-                is_page_R,
-            )[0]
-        )
-
-        if args.force_continuity:
-            offset_used = 0.0
-        else:
-            offset_cont = mr_left_at_join - mr_right_raw_at_join
-            offset_used = float(np.clip(offset_cont, *OFFSET_BOUNDS))
-
-        print(
-            f"{identifier}: join MR_L={mr_left_at_join:.6f}  "
-            f"MR_R_raw@tshift={mr_right_raw_at_join:.6f}  "
-            f"offset_used={offset_used:.6f}  tshift_used={tshift_used:.6f}"
-        )
-
-        # --- continuity at the join: compute offset so right meets left ---
         tshift_pred = float(predictions["right_time_shift_at_boundary"])
-        tshift_used = float(np.clip(tshift_pred, *TSHIFT_BOUNDS))
 
         mr_left_at_join = float(
-            _midilli_curve(
-                np.array([t_split]),
-                float(predictions["kL"]),
-                float(predictions["nL"]),
-                float(bL),
-                is_page_L,
-            )[0]
+            _midilli_curve(np.array([t_split]), kL, nL, float(bL), is_page_L)[0]
         )
 
-        mr_right_raw_at_join = float(
-            _midilli_curve(
-                np.array([tshift_used]),
-                float(predictions["kR"]),
-                float(predictions["nR"]),
-                float(bR),
-                is_page_R,
-            )[0]
-        )
+        scenarios: List[Dict[str, Any]] = []
 
-        offset_cont = mr_left_at_join - mr_right_raw_at_join
-        offset_used = float(np.clip(offset_cont, *OFFSET_BOUNDS))
+        def _add_scenario(name: str, tshift_value: float) -> None:
+            """Evaluate a scenario and enforce continuity via offset recompute."""
 
-        print(
-            f"{identifier}: join MR_L={mr_left_at_join:.6f}  "
-            f"MR_R_raw@tshift={mr_right_raw_at_join:.6f}  "
-            f"offset_used={offset_used:.6f}  tshift_used={tshift_used:.6f}"
-        )
+            tshift_used = float(np.clip(tshift_value, *TSHIFT_BOUNDS))
+            mr_right_raw_at_join = float(
+                _midilli_curve(np.array([tshift_used]), kR, nR, float(bR), is_page_R)[0]
+            )
+            offset_needed = mr_left_at_join - mr_right_raw_at_join
+            offset_used = float(np.clip(offset_needed, *OFFSET_BOUNDS))
+            curves = reconstruct_piecewise(
+                time_grid,
+                {"k": kL, "n": nL, "b": bL},
+                {"k": kR, "n": nR, "b": bR},
+                t_split,
+                offset_used,
+                tshift_used,
+                is_page_left=is_page_L,
+                is_page_right=is_page_R,
+                mr_floor=float(args.mr_floor),
+                mr_ceiling=1.0,
+            )
+            scenarios.append(
+                {
+                    "name": name,
+                    "curves": curves,
+                    "offset": offset_used,
+                    "tshift": tshift_used,
+                    "mr_right_raw_at_join": mr_right_raw_at_join,
+                }
+            )
+            print(
+                f"{identifier} [{name}]: join MR_L={mr_left_at_join:.6f}  "
+                f"MR_R_raw@tshift={mr_right_raw_at_join:.6f}  "
+                f"offset_used={offset_used:.6f}  tshift_used={tshift_used:.6f}"
+            )
 
-        curves = reconstruct_piecewise(
-            time_grid,
-            {"k": float(predictions["kL"]), "n": float(predictions["nL"]), "b": bL},
-            {"k": float(predictions["kR"]), "n": float(predictions["nR"]), "b": bR},
-            t_split,
-            offset_used,
-            tshift_used,
-            is_page_left=is_page_L,
-            is_page_right=is_page_R,
-            mr_floor=float(args.mr_floor),
-        )
+        # Scenario (a): use model predictions for tshift and report continuity offset
+        _add_scenario("model", tshift_pred)
+
+        if args.force_continuity:
+            solved_tshift = solve_tshift_for_target_mr(
+                k=kR,
+                n=nR,
+                b=bR,
+                is_page=is_page_R,
+                mr_target=mr_left_at_join,
+                max_shift=TSHIFT_BOUNDS[1],
+            )
+            _add_scenario("continuity", solved_tshift)
         observed = None
         if args.raw_root and (args.raw_root.exists()):
             from .phase2_common import load_raw_timeseries
@@ -290,21 +257,28 @@ def main(argv: List[str] | None = None) -> None:
             except Exception:
                 observed = None
 
-        segment = np.where(curves["time"] <= t_split, "left", "right")
-        df = pd.DataFrame(
-            {
-                "id": identifier,
-                "t": curves["time"],
-                "segment": segment,
-                "MR_L": curves["left"],
-                "MR_R_raw": curves["right_raw"],
-                "MR_R_shifted": curves["right_shifted"],
-                "MR_pred": curves["final"],
-                "offsetR": offset_used,
-                "tshift": tshift_used,
-                "t_split": t_split,
-            }
-        )
+        segment = np.where(time_grid <= t_split, "left", "right")
+        df_rows = []
+        for scenario in scenarios:
+            curves = scenario["curves"]
+            df_rows.append(
+                pd.DataFrame(
+                    {
+                        "id": identifier,
+                        "mode": scenario["name"],
+                        "t": curves["time"],
+                        "segment": segment,
+                        "MR_L": curves["left"],
+                        "MR_R_raw": curves["right_raw"],
+                        "MR_R_shifted": curves["right_shifted"],
+                        "MR_pred": curves["final"],
+                        "offsetR": scenario["offset"],
+                        "tshift": scenario["tshift"],
+                        "t_split": t_split,
+                    }
+                )
+            )
+        df = pd.concat(df_rows, ignore_index=True)
         df.to_csv(args.out_dir / f"{identifier}_prediction.csv", index=False)
 
         # Plot
@@ -324,14 +298,51 @@ def main(argv: List[str] | None = None) -> None:
                 observed["time_min"], observed["mr"], s=10, alpha=0.6, label="Observed MR"
             )
 
-        plt.plot(curves["time"], curves["left"],         "--", label="MR_L")
-        plt.plot(curves["time"], curves["right_raw"],    ":",  label="MR_R_raw")
-        plt.plot(curves["time"], curves["right_shifted"],     label="MR_R_shifted")
-        plt.plot(curves["time"], curves["final"],        linewidth=2, label="MR_pred")
+        base_curves = scenarios[0]["curves"]
+        plt.plot(base_curves["time"], base_curves["left"], "--", label="MR_L")
+        plt.plot(base_curves["time"], base_curves["right_raw"], ":", label="MR_R_raw (model)")
+        plt.plot(
+            base_curves["time"], base_curves["right_shifted"], label="MR_R_shifted (model)"
+        )
+        plt.plot(
+            base_curves["time"], base_curves["final"], linewidth=2, label="MR_pred (model)"
+        )
 
         join_idx = np.searchsorted(time_grid, t_split, side="left")
-        plt.scatter([t_split],[curves["left"][join_idx]], s=25, label="Join target (left)")
-        plt.scatter([t_split],[curves["right_shifted"][join_idx]], s=35, marker="x", label="Right@join after shift")
+        plt.scatter(
+            [t_split], [base_curves["left"][join_idx]], s=25, label="Join target (left)"
+        )
+        plt.scatter(
+            [t_split],
+            [base_curves["right_shifted"][join_idx]],
+            s=35,
+            marker="x",
+            label="Right@join (model)",
+        )
+
+        if args.force_continuity and len(scenarios) > 1:
+            cont_curves = scenarios[1]["curves"]
+            plt.plot(
+                cont_curves["time"],
+                cont_curves["right_raw"],
+                "--",
+                alpha=0.6,
+                label="MR_R_raw (continuity)",
+            )
+            plt.plot(
+                cont_curves["time"],
+                cont_curves["final"],
+                linewidth=2,
+                linestyle="--",
+                label="MR_pred (continuity)",
+            )
+            plt.scatter(
+                [t_split],
+                [cont_curves["right_shifted"][join_idx]],
+                s=40,
+                marker="+",
+                label="Right@join (continuity)",
+            )
 
         plt.xlabel("Time (min)"); plt.ylabel("MR")
         plt.title(f"Phase-2 prediction for {identifier}")

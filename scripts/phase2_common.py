@@ -226,9 +226,58 @@ def apply_bounds(kind: str, x: np.ndarray) -> np.ndarray:
 
 
 def _midilli_curve(t: np.ndarray, k: float, n: float, b: float, is_page: bool) -> np.ndarray:
-    # Page: MR = exp(-k * t^n), Midilli: exp(-k * t^n) + b * t
+    """Return the Midilli (or Page) curve evaluated at ``t``.
+
+    Page behaviour is recovered by zeroing ``b``; in either case ``t`` is
+    interpreted as local time (seconds or minutes) since the start of the
+    regime.
+    """
+
     base = np.exp(-k * np.power(np.maximum(t, 0.0), n))
     return base if is_page else (base + b * np.maximum(t, 0.0))
+
+
+def solve_tshift_for_target_mr(
+    k: float,
+    n: float,
+    b: float,
+    is_page: bool,
+    mr_target: float,
+    max_shift: float | None = None,
+    max_iter: int = 60,
+) -> float:
+    """Solve for the local time shift so MR(t) ≈ ``mr_target``.
+
+    The Midilli right-hand segment decays monotonically in practice, so a
+    simple bisection search suffices to find the amount of local time required
+    to reach the target moisture ratio.  The search is clipped to
+    ``TSHIFT_BOUNDS`` so pathological cases do not explode.
+    """
+
+    upper = float(TSHIFT_BOUNDS[1] if max_shift is None else max_shift)
+    lo, hi = 0.0, max(upper, 0.0)
+    if hi == 0:
+        return 0.0
+
+    def eval_curve(val: float) -> float:
+        return float(_midilli_curve(np.array([val], dtype=float), k, n, b, is_page)[0])
+
+    mr_lo = eval_curve(lo)
+    if mr_target >= mr_lo:
+        return lo
+
+    mr_hi = eval_curve(hi)
+    if mr_target <= mr_hi:
+        return hi
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        mr_mid = eval_curve(mid)
+        if mr_mid > mr_target:
+            lo = mid
+        else:
+            hi = mid
+    return hi
 
 
 def reconstruct_piecewise(
@@ -241,6 +290,7 @@ def reconstruct_piecewise(
     is_page_left: bool = False,
     is_page_right: bool = False,
     mr_floor: float = 0.0,
+    mr_ceiling: float | None = 1.0,
 ) -> dict:
     time_arr = np.asarray(time_arr, dtype=float)
 
@@ -260,8 +310,12 @@ def reconstruct_piecewise(
     if right_mask.any():
         rseg = np.minimum.accumulate(MR_R_shifted[right_mask])
         MR_final[right_mask] = rseg
+
+    # Guardrails: clamp to physical limits (floor ≤ MR ≤ ceiling)
     if mr_floor > 0:
         MR_final = np.maximum(MR_final, mr_floor)
+    if mr_ceiling is not None:
+        MR_final = np.minimum(MR_final, mr_ceiling)
 
     return {
         "time": time_arr,
