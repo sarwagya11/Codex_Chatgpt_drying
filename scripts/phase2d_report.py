@@ -237,11 +237,12 @@ def main(argv: List[str] | None = None) -> None:
                 continue
 
             pred_values = {name: predictions[name][idx] for name in TARGET_ORDER}
+            join_time = float(row["tL_end"]) if "tL_end" in row else float(row["tR_start"])
             curves = reconstruct_piecewise(
                 raw["time_min"].to_numpy(),
                 {"k": pred_values["kL"], "n": pred_values["nL"], "b": pred_values["bL"]},
                 {"k": pred_values["kR"], "n": pred_values["nR"], "b": pred_values["bR"]},
-                float(row["tR_start"]),
+                join_time,
                 pred_values["offsetR_at_join"],
                 pred_values["right_time_shift_at_boundary"],
                 bool(row.get("famL_is_page", False)),
@@ -252,7 +253,7 @@ def main(argv: List[str] | None = None) -> None:
             recon_rmse.append(rmse)
 
             time_arr = curves["time"]
-            join_idx = np.searchsorted(time_arr, row["tR_start"], side="left")
+            join_idx = np.searchsorted(time_arr, join_time, side="left")
             left_value = curves["left"][join_idx - 1 if join_idx > 0 else 0]
             right_value = curves["right_shifted"][join_idx if join_idx < len(time_arr) else -1]
             join_jumps.append(right_value - left_value)
@@ -262,7 +263,7 @@ def main(argv: List[str] | None = None) -> None:
                 "observed": raw["mr"].to_numpy(),
                 "predicted": curves["final"],
                 "residual": raw["mr"].to_numpy() - curves["final"],
-                "join_time": float(row["tR_start"]),
+                "join_time": join_time,
             }
 
     metrics = {
