@@ -128,17 +128,23 @@ def predict_for_row(
 
 def main(argv: List[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run Phase-2 continuity-aware predictor")
-    parser.add_argument("--t-source", choices=["tL_end","t_split_min"], default="tL_end")
-    parser.add_argument("--auto-page-eps", type=float, default=1e-6,
-                        help="If |b| ≤ eps on a side, force Page (b=0, is_page=True).")
-parser.add_argument("--mr-floor", type=float, default=0.03)
-parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
-parser.add_argument("--operating-point-csv", type=Path)
-parser.add_argument("--time-grid", type=str, default="0:600:1")
-parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
-parser.add_argument("--raw-root", type=Path, help="Folder with raw dataset CSVs for overlay")
-parser.add_argument("--xeq-db", type=float, default=0.0, help="Equilibrium moisture (dry-basis)")
-parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--t-source", choices=["tL_end", "t_split_min"], default="tL_end")
+    parser.add_argument(
+        "--auto-page-eps",
+        type=float,
+        default=1e-6,
+        help="If |b| ≤ eps on a side, force Page (b=0, is_page=True).",
+    )
+    parser.add_argument("--force-continuity", action="store_true",
+                        help="Solve tshift so MR_right(t_split)=MR_left(t_split); offset≈0")
+    parser.add_argument("--mr-floor", type=float, default=0.03)
+    parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
+    parser.add_argument("--operating-point-csv", type=Path)
+    parser.add_argument("--time-grid", type=str, default="0:600:1")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--raw-root", type=Path, help="Folder with raw dataset CSVs for overlay")
+    parser.add_argument("--xeq-db", type=float, default=0.0, help="Equilibrium moisture (dry-basis)")
+    parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -160,21 +166,75 @@ parser.add_argument("--log-level", default="INFO")
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for _, row in ops_df.iterrows():
-        identifier  = row["id"]
+        identifier = row["id"]
         predictions = predict_for_row(row, preproc, models, meta)
 
-        # Decide Page vs Midilli per side
-        bL = float(predictions["bL"]); bR = float(predictions["bR"])
-        is_page_L = _as_bool(row.get("famL_is_page", False))
-        is_page_R = _as_bool(row.get("famR_is_page", False))
-
-
-        if abs(bL) <= args.auto_page_eps:
-            bL = 0.0; is_page_L = True
-        if abs(bR) <= args.auto_page_eps:
-            bR = 0.0; is_page_R = True
-
         t_split = float(row[join_col])
+
+        # Current parameter predictions + Page/Midilli selection
+        kL = float(predictions["kL"])
+        nL = float(predictions["nL"])
+        bL = float(predictions["bL"])
+        kR = float(predictions["kR"])
+        nR = float(predictions["nR"])
+        bR = float(predictions["bR"])
+
+        is_page_L = bool(row.get("famL_is_page", False)) or abs(bL) <= args.auto_page_eps
+        is_page_R = bool(row.get("famR_is_page", False)) or abs(bR) <= args.auto_page_eps
+        if is_page_L:
+            bL = 0.0
+        if is_page_R:
+            bR = 0.0
+
+        offsetR = float(predictions["offsetR_at_join"])
+        tshift = float(predictions["right_time_shift_at_boundary"])
+
+        if args.force_continuity:
+            mr_target = float(_midilli_curve(np.array([t_split]), kL, nL, bL, is_page_L)[0])
+            lo, hi = 0.0, TSHIFT_BOUNDS[1]
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                mr_mid = float(_midilli_curve(np.array([mid]), kR, nR, bR, is_page_R)[0])
+                if mr_mid > mr_target:
+                    lo = mid
+                else:
+                    hi = mid
+            tshift = float(hi)
+            offsetR = 0.0
+
+        tshift_used = float(np.clip(tshift, *TSHIFT_BOUNDS))
+
+        mr_left_at_join = float(
+            _midilli_curve(
+                np.array([t_split]),
+                kL,
+                nL,
+                float(bL),
+                is_page_L,
+            )[0]
+        )
+
+        mr_right_raw_at_join = float(
+            _midilli_curve(
+                np.array([tshift_used]),
+                kR,
+                nR,
+                float(bR),
+                is_page_R,
+            )[0]
+        )
+
+        if args.force_continuity:
+            offset_used = 0.0
+        else:
+            offset_cont = mr_left_at_join - mr_right_raw_at_join
+            offset_used = float(np.clip(offset_cont, *OFFSET_BOUNDS))
+
+        print(
+            f"{identifier}: join MR_L={mr_left_at_join:.6f}  "
+            f"MR_R_raw@tshift={mr_right_raw_at_join:.6f}  "
+            f"offset_used={offset_used:.6f}  tshift_used={tshift_used:.6f}"
+        )
 
         # --- continuity at the join: compute offset so right meets left ---
         tshift_pred = float(predictions["right_time_shift_at_boundary"])
