@@ -242,45 +242,32 @@ def reconstruct_piecewise(
     is_page_right: bool = False,
     mr_floor: float = 0.0,
 ) -> dict:
-    t = np.asarray(time_arr, dtype=float)
+    time_arr = np.asarray(time_arr, dtype=float)
 
-    # Absolute time for left segment; relative time for right
-    left_t  = np.clip(t, 0.0, None)
-    right_t = np.clip(t - float(t_split) + float(tshift_right), 0.0, None)
+    # Left is evaluated on absolute time.
+    MR_L = _midilli_curve(time_arr, left["k"], left["n"], left["b"], is_page_left)
 
-    MR_L        = _midilli_curve(left_t,  left["k"],  left["n"],  left["b"],  is_page_left)
-    MR_R_raw    = _midilli_curve(right_t, right["k"], right["n"], right["b"], is_page_right)
-    MR_R_shift  = MR_R_raw + float(offsetR_at_join)
+    # Right is a local-time model. Its local time at the boundary is:
+    # right_t(t=t_split) = max(0, 0 + tshift_right) = tshift_right
+    # and for general t: right_t = max(0, (t - t_split) + tshift_right).
+    right_t = np.clip(time_arr - float(t_split) + float(tshift_right), a_min=0.0, a_max=None)
+    MR_R_raw = _midilli_curve(right_t, right["k"], right["n"], right["b"], is_page_right)
+    MR_R_shifted = MR_R_raw + float(offsetR_at_join)
 
-    # Monotone non-increase within each side
-    MR_L       = np.minimum.accumulate(MR_L)
-    MR_R_shift = np.minimum.accumulate(MR_R_shift)
-
-    # No upward step at boundary: cap right@join to left@join
-    join_idx = np.searchsorted(t, float(t_split), side="left")
-    join_val = MR_L[join_idx if join_idx < MR_L.size else MR_L.size - 1]
-    right_mask = t >= float(t_split)
+    # Compose final piecewise curve (left governs up to the split)
+    right_mask = time_arr >= float(t_split)
+    MR_final = MR_L.copy()
     if right_mask.any():
-        rseg = MR_R_shift[right_mask]
-        rseg = np.minimum(rseg, join_val)
-        rseg = np.minimum.accumulate(rseg)
-        MR_final = MR_L.copy()
+        rseg = np.minimum.accumulate(MR_R_shifted[right_mask])
         MR_final[right_mask] = rseg
-    else:
-        MR_final = MR_L.copy()
-
-    # Clamp for numerical safety
-    hi = 1.05
-    MR_L        = np.clip(MR_L,        mr_floor, hi)
-    MR_R_raw    = np.clip(MR_R_raw,    mr_floor, hi)
-    MR_R_shift  = np.clip(MR_R_shift,  mr_floor, hi)
-    MR_final    = np.clip(MR_final,    mr_floor, hi)
+    if mr_floor > 0:
+        MR_final = np.maximum(MR_final, mr_floor)
 
     return {
-        "time": t,
+        "time": time_arr,
         "left": MR_L,
         "right_raw": MR_R_raw,
-        "right_shifted": MR_R_shift,
+        "right_shifted": MR_R_shifted,
         "final": MR_final,
     }
 
