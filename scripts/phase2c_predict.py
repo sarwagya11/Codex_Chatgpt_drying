@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import sys
-
+from .phase2_common import _midilli_curve, OFFSET_BOUNDS, TSHIFT_BOUNDS
 from .phase2_common import (
     FeaturePreprocessor,  # required for joblib loading
     OFFSET_BOUNDS,
@@ -36,6 +36,12 @@ TARGET_ORDER = [
     "kR","nR","bR",
     "offsetR_at_join","right_time_shift_at_boundary",
 ]
+# top, near imports
+def _as_bool(x) -> bool:
+    if isinstance(x, (bool, np.bool_)): return bool(x)
+    if isinstance(x, (int, float)):     return bool(int(x))
+    if isinstance(x, str):              return x.strip().lower() in ("true","1","t","y","yes")
+    return False
 
 # ---------- helpers: use Phase-2B’s recorded transforms ----------
 def _inverse(values: np.ndarray, transform: str) -> np.ndarray:
@@ -230,6 +236,39 @@ def main(argv: List[str] | None = None) -> None:
             f"offset_used={offset_used:.6f}  tshift_used={tshift_used:.6f}"
         )
 
+        # --- continuity at the join: compute offset so right meets left ---
+        tshift_pred = float(predictions["right_time_shift_at_boundary"])
+        tshift_used = float(np.clip(tshift_pred, *TSHIFT_BOUNDS))
+
+        mr_left_at_join = float(
+            _midilli_curve(
+                np.array([t_split]),
+                float(predictions["kL"]),
+                float(predictions["nL"]),
+                float(bL),
+                is_page_L,
+            )[0]
+        )
+
+        mr_right_raw_at_join = float(
+            _midilli_curve(
+                np.array([tshift_used]),
+                float(predictions["kR"]),
+                float(predictions["nR"]),
+                float(bR),
+                is_page_R,
+            )[0]
+        )
+
+        offset_cont = mr_left_at_join - mr_right_raw_at_join
+        offset_used = float(np.clip(offset_cont, *OFFSET_BOUNDS))
+
+        print(
+            f"{identifier}: join MR_L={mr_left_at_join:.6f}  "
+            f"MR_R_raw@tshift={mr_right_raw_at_join:.6f}  "
+            f"offset_used={offset_used:.6f}  tshift_used={tshift_used:.6f}"
+        )
+
         curves = reconstruct_piecewise(
             time_grid,
             {"k": float(predictions["kL"]), "n": float(predictions["nL"]), "b": bL},
@@ -269,6 +308,16 @@ def main(argv: List[str] | None = None) -> None:
         df.to_csv(args.out_dir / f"{identifier}_prediction.csv", index=False)
 
         # Plot
+        dbg = {
+                "id": identifier,
+                "T_C": row["T_C"], "RH_mid_pct": row["RH_mid_pct"], "v_ms": row["v_ms"], "thickness_mm": row["thickness_mm"],
+                "t_split": t_split,
+                **predictions,
+                "bL_used": bL, "bR_used": bR,
+                "is_page_L": is_page_L, "is_page_R": is_page_R,
+            }
+        pd.DataFrame([dbg]).to_csv(args.out_dir / f"{identifier}_predict_debug.csv", index=False)
+
         plt.figure(figsize=(8, 4.5))
         if observed is not None:
             plt.scatter(

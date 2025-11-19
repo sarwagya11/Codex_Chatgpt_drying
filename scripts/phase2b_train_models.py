@@ -92,6 +92,15 @@ GBDT_MAX_DEPTH = [2, 3, 4, 5]
 GBDT_N_ESTIMATORS = [200, 400, 800]
 GBDT_LEARNING_RATE = [0.03, 0.07, 0.12]
 
+# top-level (near other helpers)
+def _as_bool(x) -> bool:
+    if isinstance(x, (bool, np.bool_)):
+        return bool(x)
+    if isinstance(x, (int, float)):
+        return bool(int(x))
+    if isinstance(x, str):
+        return x.strip().lower() in ("true", "1", "t", "y", "yes")
+    return False
 
 def _transform_target(values: np.ndarray, spec: TargetSpec) -> np.ndarray:
     if spec.transform == "log":
@@ -162,6 +171,9 @@ def _reconstruct_rmse(
     offsetR = _pick_value("offsetR_at_join")
     tshift = _pick_value("right_time_shift_at_boundary")
 
+    is_page_L = _as_bool(row.get("famL_is_page", False))
+    is_page_R = _as_bool(row.get("famR_is_page", False))   
+
     curves = reconstruct_piecewise(
         raw_df["time_min"].to_numpy(),
         left_params,
@@ -169,8 +181,8 @@ def _reconstruct_rmse(
         t_split,
         offsetR,
         tshift,
-        bool(row.get("famL_is_page", False)),
-        bool(row.get("famR_is_page", False)),
+        is_page_left=is_page_L,
+        is_page_right=is_page_R,
         mr_floor=0.0,
     )
 
