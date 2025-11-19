@@ -211,7 +211,7 @@ K_BOUNDS = (1e-6, 1.0)
 N_BOUNDS = (0.2, 3.5)
 B_BOUNDS = (-5e-3, 5e-3)
 OFFSET_BOUNDS = (-0.2, 0.2)
-TSHIFT_BOUNDS = (0.0, 120.0)
+TSHIFT_BOUNDS = (0.0, 600.0)
 
 
 def apply_bounds(kind: str, x: np.ndarray) -> np.ndarray:
@@ -270,6 +270,7 @@ def reconstruct_piecewise(
         "right_shifted": MR_R_shifted,
         "final": MR_final,
     }
+
 
 
 # ---------------------------------------------------------------------------
