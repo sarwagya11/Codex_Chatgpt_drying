@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import sys
-
+from .phase2_common import _midilli_curve, OFFSET_BOUNDS, TSHIFT_BOUNDS
 from .phase2_common import (
     FeaturePreprocessor,  # required for joblib loading
     apply_bounds,
@@ -33,6 +33,12 @@ TARGET_ORDER = [
     "kR","nR","bR",
     "offsetR_at_join","right_time_shift_at_boundary",
 ]
+# top, near imports
+def _as_bool(x) -> bool:
+    if isinstance(x, (bool, np.bool_)): return bool(x)
+    if isinstance(x, (int, float)):     return bool(int(x))
+    if isinstance(x, str):              return x.strip().lower() in ("true","1","t","y","yes")
+    return False
 
 # ---------- helpers: use Phase-2B’s recorded transforms ----------
 def _inverse(values: np.ndarray, transform: str) -> np.ndarray:
@@ -122,14 +128,14 @@ def main(argv: List[str] | None = None) -> None:
     parser.add_argument("--t-source", choices=["tL_end","t_split_min"], default="tL_end")
     parser.add_argument("--auto-page-eps", type=float, default=1e-6,
                         help="If |b| ≤ eps on a side, force Page (b=0, is_page=True).")
-parser.add_argument("--mr-floor", type=float, default=0.03)
-parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
-parser.add_argument("--operating-point-csv", type=Path)
-parser.add_argument("--time-grid", type=str, default="0:600:1")
-parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
-parser.add_argument("--raw-root", type=Path, help="Folder with raw dataset CSVs for overlay")
-parser.add_argument("--xeq-db", type=float, default=0.0, help="Equilibrium moisture (dry-basis)")
-parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--mr-floor", type=float, default=0.03)
+    parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS_DIR)
+    parser.add_argument("--operating-point-csv", type=Path)
+    parser.add_argument("--time-grid", type=str, default="0:600:1")
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument("--raw-root", type=Path, help="Folder with raw dataset CSVs for overlay")
+    parser.add_argument("--xeq-db", type=float, default=0.0, help="Equilibrium moisture (dry-basis)")
+    parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
@@ -156,8 +162,9 @@ parser.add_argument("--log-level", default="INFO")
 
         # Decide Page vs Midilli per side
         bL = float(predictions["bL"]); bR = float(predictions["bR"])
-        is_page_L = bool(row.get("famL_is_page", False))
-        is_page_R = bool(row.get("famR_is_page", False))
+        is_page_L = _as_bool(row.get("famL_is_page", False))
+        is_page_R = _as_bool(row.get("famR_is_page", False))
+
 
         if abs(bL) <= args.auto_page_eps:
             bL = 0.0; is_page_L = True
@@ -165,7 +172,8 @@ parser.add_argument("--log-level", default="INFO")
             bR = 0.0; is_page_R = True
 
         t_split = float(row[join_col])
-
+        
+        print(f"{identifier}: right segment becomes active at t_split = {t_split:.6f} min")
         curves = reconstruct_piecewise(
             time_grid,
             {"k": float(predictions["kL"]), "n": float(predictions["nL"]), "b": bL},
@@ -178,6 +186,8 @@ parser.add_argument("--log-level", default="INFO")
             mr_floor=float(args.mr_floor),
         )
         observed = None
+        right_active_mask = curves["time"] >= t_split
+        first_right_time_on_grid = float(curves["time"][right_active_mask][0])
         if args.raw_root and (args.raw_root.exists()):
             from .phase2_common import load_raw_timeseries
 
@@ -193,6 +203,8 @@ parser.add_argument("--log-level", default="INFO")
                 "id": identifier,
                 "t": curves["time"],
                 "segment": segment,
+                "right_active": right_active_mask,                 # >>> ADD
+                "first_right_time_on_grid": first_right_time_on_grid,
                 "MR_L": curves["left"],
                 "MR_R_raw": curves["right_raw"],
                 "MR_R_shifted": curves["right_shifted"],
@@ -205,6 +217,16 @@ parser.add_argument("--log-level", default="INFO")
         df.to_csv(args.out_dir / f"{identifier}_prediction.csv", index=False)
 
         # Plot
+        dbg = {
+                "id": identifier,
+                "T_C": row["T_C"], "RH_mid_pct": row["RH_mid_pct"], "v_ms": row["v_ms"], "thickness_mm": row["thickness_mm"],
+                "t_split": t_split,
+                **predictions,
+                "bL_used": bL, "bR_used": bR,
+                "is_page_L": is_page_L, "is_page_R": is_page_R,
+            }
+        pd.DataFrame([dbg]).to_csv(args.out_dir / f"{identifier}_predict_debug.csv", index=False)
+
         plt.figure(figsize=(8, 4.5))
         if observed is not None:
             plt.scatter(
@@ -215,11 +237,27 @@ parser.add_argument("--log-level", default="INFO")
         plt.plot(curves["time"], curves["right_raw"],    ":",  label="MR_R_raw")
         plt.plot(curves["time"], curves["right_shifted"],     label="MR_R_shifted")
         plt.plot(curves["time"], curves["final"],        linewidth=2, label="MR_pred")
+        
 
         join_idx = np.searchsorted(time_grid, t_split, side="left")
-        plt.scatter([t_split],[curves["left"][join_idx]], s=25, label="Join target (left)")
-        plt.scatter([t_split],[curves["right_shifted"][join_idx]], s=35, marker="x", label="Right@join after shift")
 
+        # MR values at the activation time
+        mr_left_at_join         = float(curves["left"][join_idx])
+        mr_right_raw_at_join    = float(curves["right_raw"][join_idx])
+        mr_right_shifted_at_join= float(curves["right_shifted"][join_idx])
+        mr_pred_at_join         = float(curves["final"][join_idx])
+
+
+        plt.scatter([t_split],[mr_left_at_join], s=25, label="Join target (left)")
+        plt.scatter([t_split],[mr_right_shifted_at_join], s=35, marker="x", label="Right@join after shift")
+        print(
+        f"{identifier}: t_split={t_split:.6f}  "
+        f"MR_left={mr_left_at_join:.6f}  "
+        f"MR_right_raw={mr_right_raw_at_join:.6f}  "
+        f"MR_right_shifted={mr_right_shifted_at_join:.6f}  "
+        f"MR_pred={mr_pred_at_join:.6f}"
+)
+        plt.axvline(t_split, color="k", linewidth=1, alpha=0.25)
         plt.xlabel("Time (min)"); plt.ylabel("MR")
         plt.title(f"Phase-2 prediction for {identifier}")
         plt.legend(loc="best"); plt.tight_layout()
