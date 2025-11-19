@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import sys
-
+from .phase2_common import _midilli_curve, OFFSET_BOUNDS, TSHIFT_BOUNDS
 from .phase2_common import (
     FeaturePreprocessor,  # required for joblib loading
     OFFSET_BOUNDS,
@@ -37,6 +37,12 @@ TARGET_ORDER = [
     "kR","nR","bR",
     "offsetR_at_join","right_time_shift_at_boundary",
 ]
+# top, near imports
+def _as_bool(x) -> bool:
+    if isinstance(x, (bool, np.bool_)): return bool(x)
+    if isinstance(x, (int, float)):     return bool(int(x))
+    if isinstance(x, str):              return x.strip().lower() in ("true","1","t","y","yes")
+    return False
 
 # ---------- helpers: use Phase-2B’s recorded transforms ----------
 def _inverse(values: np.ndarray, transform: str) -> np.ndarray:
@@ -276,6 +282,16 @@ def main(argv: List[str] | None = None) -> None:
         df.to_csv(args.out_dir / f"{identifier}_prediction.csv", index=False)
 
         # Plot
+        dbg = {
+                "id": identifier,
+                "T_C": row["T_C"], "RH_mid_pct": row["RH_mid_pct"], "v_ms": row["v_ms"], "thickness_mm": row["thickness_mm"],
+                "t_split": t_split,
+                **predictions,
+                "bL_used": bL, "bR_used": bR,
+                "is_page_L": is_page_L, "is_page_R": is_page_R,
+            }
+        pd.DataFrame([dbg]).to_csv(args.out_dir / f"{identifier}_predict_debug.csv", index=False)
+
         plt.figure(figsize=(8, 4.5))
         if observed is not None:
             plt.scatter(
