@@ -73,11 +73,11 @@ class TargetSpec:
 
 TARGET_SPECS: Dict[str, TargetSpec] = {
     "kL": TargetSpec("kL", "log", "k"),
-    "nL": TargetSpec("nL", "identity", "n"),
-    "bL": TargetSpec("bL", "slog1p", "b"),   # add
+    "nL": TargetSpec("nL", "log", "n"),
+    "bL": TargetSpec("bL", "identity", "b"),
     "kR": TargetSpec("kR", "log", "k"),
-    "nR": TargetSpec("nR", "identity", "n"),
-    "bR": TargetSpec("bR", "slog1p", "b"),   # add
+    "nR": TargetSpec("nR", "log", "n"),
+    "bR": TargetSpec("bR", "identity", "b"),
     "offsetR_at_join": TargetSpec("offsetR_at_join", "identity", "offset"),
     "right_time_shift_at_boundary": TargetSpec(
         "right_time_shift_at_boundary", "identity", "tshift"
@@ -96,19 +96,11 @@ GBDT_LEARNING_RATE = [0.03, 0.07, 0.12]
 def _transform_target(values: np.ndarray, spec: TargetSpec) -> np.ndarray:
     if spec.transform == "log":
         return np.log(np.clip(values, 1e-12, None))
-    # CHANGE 2: signed log1p for b
-    if spec.transform == "slog1p":
-        s = np.sign(values)
-        return s * np.log1p(np.abs(values))
     return values
 
 def _inverse_target(values: np.ndarray, spec: TargetSpec) -> np.ndarray:
     if spec.transform == "log":
         return np.exp(values)
-    # CHANGE 3: inverse of slog1p
-    if spec.transform == "slog1p":
-        s = np.sign(values)
-        return s * (np.expm1(np.abs(values)))
     return values
 
 
@@ -445,6 +437,42 @@ def main(argv: List[str] | None = None) -> None:
             "right_time_shift_at_boundary": "join_tshift.joblib",
         }[target]
         joblib.dump(model, out_dir / model_path)
+
+        X_proc = preprocessor.transform(features)
+        design_train = (
+            build_elasticnet_design(X_proc)
+            if best_family == "elasticnet"
+            else build_gbdt_matrix(X_proc)
+        )
+        y_train = df[target].to_numpy(dtype=float)
+        yhat = model.predict(design_train)
+
+        def _inv(name: str, arr: np.ndarray) -> np.ndarray:
+            return np.exp(arr) if name in {"kL", "kR", "nL", "nR"} else arr
+
+        yhat_real = apply_bounds(
+            "k"
+            if target.startswith("k")
+            else "n"
+            if target.startswith("n")
+            else "b"
+            if target.startswith("b")
+            else "offset"
+            if target == "offsetR_at_join"
+            else "tshift",
+            _inv(target, yhat),
+        )
+
+        dbg = pd.DataFrame(
+            {
+                "dataset": df["dataset"].to_numpy(),
+                "target": target,
+                "y_true": y_train,
+                "y_pred_train_trans": yhat,
+                "y_pred_train": yhat_real,
+            }
+        )
+        dbg.to_csv(out_dir / f"train_debug__{target}.csv", index=False)
 
         meta["targets"][target] = {
             "family": best_family,

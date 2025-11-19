@@ -183,71 +183,21 @@ def parse_dataset_stem(stem: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-REQUIRED_RAW_COLUMNS = ("time_min", "mr")
-
-
-def load_raw_timeseries(raw_root: Path, dataset_stem: str) -> pd.DataFrame:
-    """Load one raw timeseries and return columns: time_min, mr_iso, mr."""
-    csv_path = (raw_root / f"{dataset_stem}.csv")
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Raw CSV not found: {csv_path}")
-
-    df = pd.read_csv(csv_path)
-
-    # --- time column ---
-    time_cols = ["time_min", "t_min", "time", "t", "minutes"]
-    time_col = next((c for c in time_cols if c in df.columns), None)
-    if time_col is None:
-        raise ValueError(
-            f"Raw {csv_path} missing a time column; "
-            f"expected one of {time_cols}"
-        )
-    df = df.rename(columns={time_col: "time_min"})
-    df["time_min"] = pd.to_numeric(df["time_min"], errors="coerce")
-
-    # --- MR column(s) ---
-    # If MR already present, keep it.
-    if "mr_iso" in df.columns or "mr" in df.columns:
-        mr = df["mr_iso"] if "mr_iso" in df.columns else df["mr"]
-        mr = pd.to_numeric(mr, errors="coerce")
-        df["mr_iso"] = mr
-        df["mr"] = mr
-    else:
-        # Build MR from dry-basis moisture content if available
-        x_cols = ["xdb", "Xdb", "moisture_db", "X_db", "X"]
-        x_col = next((c for c in x_cols if c in df.columns), None)
-        if x_col is None:
-            raise ValueError(
-                f"Raw {csv_path} missing required columns: mr/mr_iso or any of {x_cols}"
-            )
-
-        X = pd.to_numeric(df[x_col], errors="coerce")
-
-        # Allow optional provided X0/Xeq; otherwise infer sensible defaults
-        X0 = (pd.to_numeric(df["X0_db"], errors="coerce").iloc[0]
-              if "X0_db" in df.columns else float(X.iloc[0]))
-        # Prefer explicit Xeq if present; else use 0.0 (standard when equilibrium is dry)
-        Xeq = (pd.to_numeric(df["Xeq_db"], errors="coerce").iloc[0]
-               if "Xeq_db" in df.columns else 0.0)
-
-        denom = max(1e-12, (X0 - Xeq))
-        mr = (X - Xeq) / denom
-        mr = mr.astype(float).clip(lower=0.0)  # avoid negative MR
-        df["mr_iso"] = mr
-        df["mr"] = mr
-
-    # Final sanity
-    need = ["time_min", "mr_iso", "mr"]
-    if not all(c in df.columns for c in need):
-        missing = [c for c in need if c not in df.columns]
-        raise ValueError(f"Raw {csv_path} missing required columns after normalization: {missing}")
-
-    # Drop non-finite
-    df = df[np.isfinite(df["time_min"]) & np.isfinite(df["mr_iso"])]
-    if df.empty:
-        raise ValueError(f"Raw {csv_path} became empty after filtering non-finite entries.")
-
-    return df[["time_min", "mr_iso", "mr"]].reset_index(drop=True)
+def load_raw_timeseries(raw_root: Path, dataset_stem: str, xeq_db: float = 0.0) -> pd.DataFrame:
+    """
+    Expect a CSV per dataset with columns:
+      time_min, X_db  (dry-basis moisture content)
+    MR = (X_db - Xeq)/(X0 - Xeq); for Xeq=0 -> MR = X_db / X0.
+    """
+    csv = (raw_root / f"{dataset_stem}.csv")
+    df = pd.read_csv(csv)
+    if "X_db" not in df.columns or "time_min" not in df.columns:
+        raise ValueError(f"{csv} must contain time_min and X_db")
+    x0 = float(df["X_db"].iloc[0])
+    mr = (df["X_db"].to_numpy() - xeq_db) / max(x0 - xeq_db, 1e-12)
+    out = df.copy()
+    out["mr"] = np.clip(mr, 0.0, 1.1)
+    return out
 
 
 
@@ -256,106 +206,123 @@ def load_raw_timeseries(raw_root: Path, dataset_stem: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def _midilli_curve(t: np.ndarray, k: float, n: float, b: float, is_page: bool) -> np.ndarray:
-    """Evaluate the Midilli (or Page when ``is_page``) curve."""
-
-    if is_page:
-        b = 0.0
-    return np.exp(-(k * np.power(t, n))) + b * t
-
-
-def _clip_bounds(value: np.ndarray, lower: float, upper: float) -> np.ndarray:
-    return np.clip(value, lower, upper)
-
-
-K_BOUNDS = (1e-6, 1e-1)
-N_BOUNDS = (0.4, 2.2)
+# Bounds used everywhere
+K_BOUNDS = (1e-6, 1.0)
+N_BOUNDS = (0.2, 3.5)
 B_BOUNDS = (-5e-3, 5e-3)
-OFFSET_BOUNDS = (-0.05, 0.05)
-TSHIFT_BOUNDS = (-45.0, 45.0)
+OFFSET_BOUNDS = (-0.2, 0.2)
+TSHIFT_BOUNDS = (0.0, 600.0)
 
 
-def apply_bounds(name: str, values: np.ndarray) -> np.ndarray:
-    """Apply parameter bounds defined for Phase-2 targets."""
-
-    bounds_map = {
+def apply_bounds(kind: str, x: np.ndarray) -> np.ndarray:
+    lo, hi = {
         "k": K_BOUNDS,
         "n": N_BOUNDS,
         "b": B_BOUNDS,
         "offset": OFFSET_BOUNDS,
         "tshift": TSHIFT_BOUNDS,
-    }
+    }[kind]
+    return np.clip(x, lo, hi)
 
-    if name not in bounds_map:
-        return values
 
-    lower, upper = bounds_map[name]
-    return np.clip(values, lower, upper)
+def _midilli_curve(t: np.ndarray, k: float, n: float, b: float, is_page: bool) -> np.ndarray:
+    """Return the Midilli (or Page) curve evaluated at ``t``.
+
+    Page behaviour is recovered by zeroing ``b``; in either case ``t`` is
+    interpreted as local time (seconds or minutes) since the start of the
+    regime.
+    """
+
+    base = np.exp(-k * np.power(np.maximum(t, 0.0), n))
+    return base if is_page else (base + b * np.maximum(t, 0.0))
+
+
+def solve_tshift_for_target_mr(
+    k: float,
+    n: float,
+    b: float,
+    is_page: bool,
+    mr_target: float,
+    max_shift: float | None = None,
+    max_iter: int = 60,
+) -> float:
+    """Solve for the local time shift so MR(t) ≈ ``mr_target``.
+
+    The Midilli right-hand segment decays monotonically in practice, so a
+    simple bisection search suffices to find the amount of local time required
+    to reach the target moisture ratio.  The search is clipped to
+    ``TSHIFT_BOUNDS`` so pathological cases do not explode.
+    """
+
+    upper = float(TSHIFT_BOUNDS[1] if max_shift is None else max_shift)
+    lo, hi = 0.0, max(upper, 0.0)
+    if hi == 0:
+        return 0.0
+
+    def eval_curve(val: float) -> float:
+        return float(_midilli_curve(np.array([val], dtype=float), k, n, b, is_page)[0])
+
+    mr_lo = eval_curve(lo)
+    if mr_target >= mr_lo:
+        return lo
+
+    mr_hi = eval_curve(hi)
+    if mr_target <= mr_hi:
+        return hi
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        mr_mid = eval_curve(mid)
+        if mr_mid > mr_target:
+            lo = mid
+        else:
+            hi = mid
+    return hi
 
 
 def reconstruct_piecewise(
-    time_min: Iterable[float],
-    left_params: Mapping[str, float],
-    right_params: Mapping[str, float],
+    time_arr: np.ndarray,
+    left: dict,
+    right: dict,
     t_split: float,
-    offset_right: float,
+    offsetR_at_join: float,
     tshift_right: float,
-    is_page_left: bool,
-    is_page_right: bool,
-    mr_floor: float = 0.0
-) -> Dict[str, np.ndarray]:
-    """Rebuild a piecewise Midilli/Page curve with continuity guards.
+    is_page_left: bool = False,
+    is_page_right: bool = False,
+    mr_floor: float = 0.0,
+    mr_ceiling: float | None = 1.0,
+) -> dict:
+    time_arr = np.asarray(time_arr, dtype=float)
 
-    Returns a dictionary containing the left curve, the raw right curve, the
-    level-shifted right curve, and the final guarded prediction.
-    """
+    # Left is evaluated on absolute time.
+    MR_L = _midilli_curve(time_arr, left["k"], left["n"], left["b"], is_page_left)
 
-    time_arr = np.asarray(list(time_min), dtype=float)
-    if time_arr.ndim != 1:
-        raise ValueError("time_min must be one-dimensional")
+    # Right is a local-time model. Its local time at the boundary is:
+    # right_t(t=t_split) = max(0, 0 + tshift_right) = tshift_right
+    # and for general t: right_t = max(0, (t - t_split) + tshift_right).
+    right_t = np.clip(time_arr - float(t_split) + float(tshift_right), a_min=0.0, a_max=None)
+    MR_R_raw = _midilli_curve(right_t, right["k"], right["n"], right["b"], is_page_right)
+    MR_R_shifted = MR_R_raw + float(offsetR_at_join)
 
-    left_t = np.clip(time_arr, a_min=0.0, a_max=None)
-    right_t = np.clip((time_arr + tshift_right), a_min=0.0, a_max=None)
-    
-
-    kL = float(left_params["k"])
-    nL = float(left_params["n"])
-    bL = float(left_params["b"])
-    kR = float(right_params["k"])
-    nR = float(right_params["n"])
-    bR = float(right_params["b"])
-
-    left_curve = _midilli_curve(left_t, kL, nL, bL, is_page_left)
-    right_raw = _midilli_curve(right_t, kR, nR, bR, is_page_right)
-    
-    right_raw = _clip_bounds(right_raw, 0.0, 1.05)
-    right_shifted = right_raw + offset_right
-
-    # Enforce monotonic non-increase on each side separately
-    left_curve  = np.minimum.accumulate(left_curve)
-    right_shifted = np.minimum.accumulate(right_shifted)
-
-    final = left_curve.copy()
-    right_mask = time_arr >= t_split
+    # Compose final piecewise curve (left governs up to the split)
+    right_mask = time_arr >= float(t_split)
+    MR_final = MR_L.copy()
     if right_mask.any():
-        join_idx = np.searchsorted(time_arr, t_split, side="left")
-        join_value = left_curve[join_idx] if join_idx < len(left_curve) else left_curve[-1]
-        guarded_right = right_shifted[right_mask]
-        guarded_right = np.minimum(guarded_right, join_value)
-        guarded_right = np.minimum.accumulate(guarded_right)
-        final[right_mask] = guarded_right
+        rseg = np.minimum.accumulate(MR_R_shifted[right_mask])
+        MR_final[right_mask] = rseg
 
-    final        = _clip_bounds(final,        mr_floor, 1.05)
-    left_curve   = _clip_bounds(left_curve,   mr_floor, 1.05)
-    right_raw    = _clip_bounds(right_raw,    mr_floor, 1.05)
-    right_shifted= _clip_bounds(right_shifted,mr_floor, 1.05)
+    # Guardrails: clamp to physical limits (floor ≤ MR ≤ ceiling)
+    if mr_floor > 0:
+        MR_final = np.maximum(MR_final, mr_floor)
+    if mr_ceiling is not None:
+        MR_final = np.minimum(MR_final, mr_ceiling)
 
     return {
         "time": time_arr,
-        "left": left_curve,
-        "right_raw": right_raw,
-        "right_shifted": right_shifted,
-        "final": final,
+        "left": MR_L,
+        "right_raw": MR_R_raw,
+        "right_shifted": MR_R_shifted,
+        "final": MR_final,
     }
 
 
