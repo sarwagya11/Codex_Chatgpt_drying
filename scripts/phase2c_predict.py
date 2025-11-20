@@ -211,7 +211,7 @@ def main(argv: List[str] | None = None) -> None:
             print(
             f"{identifier} [{name}]  t_split={t_split:.3f}  "
             f"tshift_used={tshift_used:.3f}  "
-            f"right_t_at_join={tshift_used:.3f}  "
+            f"right_t_at_join={join_time_right:.3f}  "
             f"MR_R_raw_at_join={mr_right_raw_at_join:.6f}"
 )
 
@@ -298,43 +298,31 @@ def main(argv: List[str] | None = None) -> None:
             }
         pd.DataFrame([dbg]).to_csv(args.out_dir / f"{identifier}_predict_debug.csv", index=False)
 
+                # ---- Plot: obs + model + continuity + split line ----
         plt.figure(figsize=(8, 4.5))
+
+        # 1) Observed MR
         if observed is not None:
             plt.scatter(
-                observed["time_min"], observed["mr"], s=10, alpha=0.6, label="Observed MR"
+                observed["time_min"],
+                observed["mr"],
+                s=10,
+                alpha=0.6,
+                label="Observed MR",
             )
 
+        # 2) Model scenario (always present, index 0)
         base_curves = scenarios[0]["curves"]
-        plt.plot(base_curves["time"], base_curves["left"], "--", label="MR_L")
-        plt.plot(base_curves["time"], base_curves["right_raw"], ":", label="MR_R_raw (model)")
         plt.plot(
-            base_curves["time"], base_curves["right_shifted"], label="MR_R_shifted (model)"
-        )
-        plt.plot(
-            base_curves["time"], base_curves["final"], linewidth=2, label="MR_pred (model)"
+            base_curves["time"],
+            base_curves["final"],
+            linewidth=2,
+            label="MR_pred (model)",
         )
 
-        join_idx = np.searchsorted(time_grid, t_split, side="left")
-        plt.scatter(
-            [t_split], [base_curves["left"][join_idx]], s=25, label="Join target (left)"
-        )
-        plt.scatter(
-            [t_split],
-            [base_curves["right_shifted"][join_idx]],
-            s=35,
-            marker="x",
-            label="Right@join (model)",
-        )
-
+        # 3) Continuity scenario (only if force_continuity and we built it)
         if args.force_continuity and len(scenarios) > 1:
             cont_curves = scenarios[1]["curves"]
-            plt.plot(
-                cont_curves["time"],
-                cont_curves["right_raw"],
-                "--",
-                alpha=0.6,
-                label="MR_R_raw (continuity)",
-            )
             plt.plot(
                 cont_curves["time"],
                 cont_curves["final"],
@@ -342,19 +330,24 @@ def main(argv: List[str] | None = None) -> None:
                 linestyle="--",
                 label="MR_pred (continuity)",
             )
-            plt.scatter(
-                [t_split],
-                [cont_curves["right_shifted"][join_idx]],
-                s=40,
-                marker="+",
-                label="Right@join (continuity)",
-            )
 
-        plt.xlabel("Time (min)"); plt.ylabel("MR")
+        # 4) Vertical line at split time
+        plt.axvline(
+            x=t_split,
+            linestyle=":",
+            linewidth=1,
+            color="k",
+            label="Split time",
+        )
+
+        plt.xlabel("Time (min)")
+        plt.ylabel("MR")
         plt.title(f"Phase-2 prediction for {identifier}")
-        plt.legend(loc="best"); plt.tight_layout()
+        plt.legend(loc="best")
+        plt.tight_layout()
         plt.savefig(args.out_dir / f"{identifier}_prediction.png", dpi=150)
         plt.close()
+
 
     write_run_meta(args.out_dir, list(sys.argv))
 

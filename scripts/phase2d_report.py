@@ -243,8 +243,8 @@ def main(argv: List[str] | None = None) -> None:
                 {"k": pred_values["kL"], "n": pred_values["nL"], "b": pred_values["bL"]},
                 {"k": pred_values["kR"], "n": pred_values["nR"], "b": pred_values["bR"]},
                 join_time,
-                pred_values["offsetR_at_join"],
-                pred_values["right_time_shift_at_boundary"],
+                 float(pred_values["offsetR_at_join"]),
+                float(pred_values["right_time_shift_at_boundary"]),
                 bool(row.get("famL_is_page", False)),
                 bool(row.get("famR_is_page", False)),
             )
