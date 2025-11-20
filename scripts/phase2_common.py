@@ -210,7 +210,7 @@ def load_raw_timeseries(raw_root: Path, dataset_stem: str, xeq_db: float = 0.0) 
 K_BOUNDS = (1e-6, 1.0)
 N_BOUNDS = (0.2, 3.5)
 B_BOUNDS = (-5e-3, 5e-3)
-OFFSET_BOUNDS = (-0.2, 0.2)
+OFFSET_BOUNDS = (-0.2, 2.0)
 TSHIFT_BOUNDS = (0.0, 600.0)
 
 

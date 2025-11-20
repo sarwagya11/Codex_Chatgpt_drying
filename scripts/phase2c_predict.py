@@ -205,6 +205,13 @@ def main(argv: List[str] | None = None) -> None:
             mr_right_raw_at_join = float(
                 _midilli_curve(np.array([tshift_used]), kR, nR, float(bR), is_page_R)[0]
             )
+            print(
+            f"{identifier} [{name}]  t_split={t_split:.3f}  "
+            f"tshift_used={tshift_used:.3f}  "
+            f"right_t_at_join={tshift_used:.3f}  "
+            f"MR_R_raw_at_join={mr_right_raw_at_join:.6f}"
+)
+
             offset_needed = mr_left_at_join - mr_right_raw_at_join
             offset_used = float(np.clip(offset_needed, *OFFSET_BOUNDS))
             curves = reconstruct_piecewise(
