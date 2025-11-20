@@ -243,31 +243,35 @@ def solve_tshift_for_target_mr(
     b: float,
     is_page: bool,
     mr_target: float,
+    base_time: float = 0.0,
     max_shift: float | None = None,
     max_iter: int = 60,
 ) -> float:
-    """Solve for the local time shift so MR(t) ≈ ``mr_target``.
+    """Solve for the additional time shift Δt so MR(t_split + Δt) ≈ ``mr_target``.
 
-    The Midilli right-hand segment decays monotonically in practice, so a
-    simple bisection search suffices to find the amount of local time required
-    to reach the target moisture ratio.  The search is clipped to
-    ``TSHIFT_BOUNDS`` so pathological cases do not explode.
+    Here ``base_time`` is typically the split time t_split (in minutes).  The
+    solver returns a non-negative shift Δt such that the Midilli/Page curve
+    evaluated at t = base_time + Δt is close to the target MR.  The search is
+    clipped to ``TSHIFT_BOUNDS`` so pathological cases do not explode.
     """
 
     upper = float(TSHIFT_BOUNDS[1] if max_shift is None else max_shift)
     lo, hi = 0.0, max(upper, 0.0)
-    if hi == 0:
+    if hi == 0.0:
         return 0.0
 
-    def eval_curve(val: float) -> float:
-        return float(_midilli_curve(np.array([val], dtype=float), k, n, b, is_page)[0])
+    def eval_curve(shift: float) -> float:
+        t = float(base_time) + float(shift)
+        return float(_midilli_curve(np.array([t], dtype=float), k, n, b, is_page)[0])
 
     mr_lo = eval_curve(lo)
     if mr_target >= mr_lo:
+        # Target is wetter than or equal to MR at base_time; no extra shift needed.
         return lo
 
     mr_hi = eval_curve(hi)
     if mr_target <= mr_hi:
+        # Even at the upper bound we are still too wet or equal; clamp there.
         return hi
 
     for _ in range(max_iter):
@@ -292,20 +296,42 @@ def reconstruct_piecewise(
     mr_floor: float = 0.0,
     mr_ceiling: float | None = 1.0,
 ) -> dict:
-    time_arr = np.asarray(time_arr, dtype=float)
+    """Reconstruct a piecewise Midilli/Page curve using absolute time.
 
-    # Left is evaluated on absolute time.
+    Left segment is evaluated on absolute time.  The right segment is also
+    parameterised in absolute experimental time, and ``tshift_right`` is
+    interpreted as a *small additive tweak* to the first right-hand time
+    point (as in the Phase-1 recursive fitter), not as a local time origin.
+    """
+
+    time_arr = np.asarray(time_arr, dtype=float)
+    split = float(t_split)
+    offset = float(offsetR_at_join)
+    tshift = float(tshift_right)
+
+    # Left: absolute time
     MR_L = _midilli_curve(time_arr, left["k"], left["n"], left["b"], is_page_left)
 
-    # Right is a local-time model. Its local time at the boundary is:
-    # right_t(t=t_split) = max(0, 0 + tshift_right) = tshift_right
-    # and for general t: right_t = max(0, (t - t_split) + tshift_right).
-    right_t = np.clip(time_arr - float(t_split) + float(tshift_right), a_min=0.0, a_max=None)
-    MR_R_raw = _midilli_curve(right_t, right["k"], right["n"], right["b"], is_page_right)
-    MR_R_shifted = MR_R_raw + float(offsetR_at_join)
+    # Right: absolute time with boundary tweak on the first right point
+    MR_R_raw = np.zeros_like(time_arr)
+    MR_R_shifted = np.zeros_like(time_arr)
+
+    right_mask = time_arr >= split
+    if right_mask.any():
+        right_times = time_arr[right_mask].copy()
+
+        # Emulate Phase-1 behaviour: adjust only the first right-hand time stamp.
+        right_times[0] = max(right_times[0] + tshift, 0.0)
+
+        right_vals = _midilli_curve(
+            right_times, right["k"], right["n"], right["b"], is_page_right
+        )
+        right_vals_shifted = right_vals + offset
+
+        MR_R_raw[right_mask] = right_vals
+        MR_R_shifted[right_mask] = right_vals_shifted
 
     # Compose final piecewise curve (left governs up to the split)
-    right_mask = time_arr >= float(t_split)
     MR_final = MR_L.copy()
     if right_mask.any():
         rseg = np.minimum.accumulate(MR_R_shifted[right_mask])

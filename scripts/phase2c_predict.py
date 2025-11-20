@@ -202,8 +202,11 @@ def main(argv: List[str] | None = None) -> None:
             """Evaluate a scenario and enforce continuity via offset recompute."""
 
             tshift_used = float(np.clip(tshift_value, *TSHIFT_BOUNDS))
+
+            # Right-hand MR at the join is evaluated at absolute time t = t_split + tshift_used.
+            join_time_right = t_split + tshift_used
             mr_right_raw_at_join = float(
-                _midilli_curve(np.array([tshift_used]), kR, nR, float(bR), is_page_R)[0]
+                _midilli_curve(np.array([join_time_right], dtype=float), kR, nR, float(bR), is_page_R)[0]
             )
             print(
             f"{identifier} [{name}]  t_split={t_split:.3f}  "
@@ -235,11 +238,6 @@ def main(argv: List[str] | None = None) -> None:
                     "mr_right_raw_at_join": mr_right_raw_at_join,
                 }
             )
-            print(
-                f"{identifier} [{name}]: join MR_L={mr_left_at_join:.6f}  "
-                f"MR_R_raw@tshift={mr_right_raw_at_join:.6f}  "
-                f"offset_used={offset_used:.6f}  tshift_used={tshift_used:.6f}"
-            )
 
         # Scenario (a): use model predictions for tshift and report continuity offset
         _add_scenario("model", tshift_pred)
@@ -251,6 +249,7 @@ def main(argv: List[str] | None = None) -> None:
                 b=bR,
                 is_page=is_page_R,
                 mr_target=mr_left_at_join,
+                base_time=t_split,
                 max_shift=TSHIFT_BOUNDS[1],
             )
             _add_scenario("continuity", solved_tshift)
