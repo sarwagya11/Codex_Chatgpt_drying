@@ -352,6 +352,63 @@ def reconstruct_piecewise(
     }
 
 
+def reconstruct_two_segment_continuous(
+    time_arr: np.ndarray,
+    left: dict,
+    right: dict,
+    t_split: float,
+    is_page_left: bool = False,
+    is_page_right: bool = False,
+    mr_floor: float = 0.0,
+    mr_ceiling: float | None = 1.0,
+) -> dict:
+    """Reconstruct a two-segment curve with a continuous join at ``t_split``.
+
+    The left segment is evaluated on absolute time.  The right segment is
+    parameterised with local time relative to ``t_split`` and shifted so that
+    its first point matches the left-hand value at the split.
+    """
+
+    time_arr = np.asarray(time_arr, dtype=float)
+    split = float(t_split)
+
+    MR_L = _midilli_curve(time_arr, left["k"], left["n"], left["b"], is_page_left)
+
+    MR_R = np.zeros_like(time_arr)
+    right_mask = time_arr >= split
+
+    if right_mask.any():
+        local_times = np.maximum(time_arr[right_mask] - split, 0.0)
+        right_vals = _midilli_curve(local_times, right["k"], right["n"], right["b"], is_page_right)
+
+        join_val = float(
+            _midilli_curve(np.array([split], dtype=float), left["k"], left["n"], left["b"], is_page_left)[
+                0
+            ]
+        )
+        offset = join_val - float(right_vals[0]) if right_vals.size else 0.0
+        right_vals = right_vals + offset
+
+        MR_R[right_mask] = right_vals
+
+    MR_final = MR_L.copy()
+    if right_mask.any():
+        rseg = np.minimum.accumulate(MR_R[right_mask])
+        MR_final[right_mask] = rseg
+
+    if mr_floor > 0:
+        MR_final = np.maximum(MR_final, mr_floor)
+    if mr_ceiling is not None:
+        MR_final = np.minimum(MR_final, mr_ceiling)
+
+    return {
+        "time": time_arr,
+        "left": MR_L,
+        "right_shifted": MR_R,
+        "final": MR_final,
+    }
+
+
 
 # ---------------------------------------------------------------------------
 # Feature preprocessing
@@ -404,25 +461,35 @@ class FeaturePreprocessor:
 def build_elasticnet_design(df: pd.DataFrame) -> np.ndarray:
     """Construct the polynomial feature matrix for Elastic Net models."""
 
-    required = ["T_C", "RH_mid_pct", "v_ms", "thickness_mm"]
-    for name in required:
+    base_features = ["T_C", "RH_mid_pct", "v_ms", "thickness_mm"]
+    for name in base_features:
         if name not in df.columns:
             raise KeyError(f"Feature '{name}' missing from dataframe")
 
-    interactions = {
-        "T_C*RH_mid_pct": df["T_C"] * df["RH_mid_pct"],
-        "T_C*v_ms": df["T_C"] * df["v_ms"],
-        "v_ms*thickness_mm": df["v_ms"] * df["thickness_mm"],
-    }
+    inv_T_K = 1.0 / (df["T_C"] + 273.15)
+    log_v = np.log(np.clip(df["v_ms"], 1e-6, None))
+    RH_frac = df["RH_mid_pct"] / 100.0
+    inv_RH = 1.0 / np.clip(RH_frac, 1e-6, None)
+    thick_sq = df["thickness_mm"] ** 2
 
-    columns: List[np.ndarray] = [df[name].to_numpy(dtype=float) for name in required]
-    columns.extend(arr.to_numpy(dtype=float) for arr in interactions.values())
-
-    # Add missing indicators at the end to keep them available to the model.
-    indicator_cols = [
-        col for col in df.columns if col.endswith("_missing") and col[:-8] in required
+    interactions = [
+        df["T_C"] * df["RH_mid_pct"],
+        df["T_C"] * df["v_ms"],
+        df["v_ms"] * df["thickness_mm"],
     ]
-    columns.extend(df[name].to_numpy(dtype=float) for name in indicator_cols)
+
+    columns: List[np.ndarray] = []
+    columns.extend(np.asarray(df[name], dtype=float) for name in base_features)
+    columns.extend(
+        np.asarray(arr, dtype=float)
+        for arr in [inv_T_K, log_v, RH_frac, inv_RH, thick_sq]
+    )
+    columns.extend(np.asarray(arr, dtype=float) for arr in interactions)
+
+    indicator_cols = [
+        col for col in df.columns if col.endswith("_missing") and col[:-8] in base_features
+    ]
+    columns.extend(np.asarray(df[name], dtype=float) for name in indicator_cols)
 
     return np.column_stack(columns)
 
