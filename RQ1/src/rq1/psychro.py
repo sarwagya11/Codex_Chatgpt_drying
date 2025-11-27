@@ -40,6 +40,43 @@ def temperature_from_h_omega_C(h_kJ_per_kg: float, omega: float) -> float:
         raise ValueError("Denominator for temperature inversion is zero.")
     return (h_kJ_per_kg - omega * H_FG0_KJ_PER_KG) / denominator
 
+def dewpoint_from_omega_C(
+    omega: float,
+    p_total_Pa: float = P_ATM_PA,
+    T_min_C: float = -20.0,
+    T_max_C: float = 60.0,
+    max_iter: int = 40,
+) -> float:
+    """
+    Compute the dewpoint temperature [°C] for a given humidity ratio omega
+    at total pressure p_total_Pa.
+
+    Definition: T_dp such that air at T_dp is saturated (RH = 1) and has
+    the given humidity ratio omega.
+
+    We solve for T in:
+        omega = humidity_ratio_from_T_RH(T, RH=1.0)
+
+    using a simple bisection in [T_min_C, T_max_C].
+    """
+    # If omega is extremely small or negative, return something cold.
+    if omega <= 0.0:
+        return T_min_C
+
+    lo = T_min_C
+    hi = T_max_C
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        omega_mid = humidity_ratio_from_T_RH(mid, 1.0, p_total_Pa)
+        if omega_mid > omega:
+            hi = mid
+        else:
+            lo = mid
+
+    return 0.5 * (lo + hi)
+
+
 
 if __name__ == "__main__":
     T_test = 30.0

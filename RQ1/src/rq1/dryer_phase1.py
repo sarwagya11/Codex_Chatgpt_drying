@@ -15,6 +15,7 @@ from .psychro import (
     humidity_ratio_from_T_RH,
     moist_air_enthalpy_kJ_per_kg,
     temperature_from_h_omega_C,
+    dewpoint_from_omega_C,
 )
 
 
@@ -78,10 +79,22 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         dm_w_kg = m_p_dry * dX
         m_w_rate_kg_per_s = dm_w_kg / dt_s
 
+        # 5) Chamber outlet air
         omega_out = omega_in + m_w_rate_kg_per_s / m_da
-        h_out = h_in - (m_w_rate_kg_per_s * h_fg / m_da)
+
+        # First, assume adiabatic (constant enthalpy) to get a trial state
+        h_out = h_in
         T_out_C = temperature_from_h_omega_C(h_out, omega_out)
         RH_out_frac = RH_from_T_omega(T_out_C, omega_out)
+
+        # Saturation clamp: if RH_out > 1, force saturation and recompute T_out, h_out
+        if RH_out_frac > 1.0:
+            # Dewpoint temperature at this humidity ratio (saturated state)
+            T_out_C = dewpoint_from_omega_C(omega_out)
+            RH_out_frac = 1.0
+            # Update enthalpy for the saturated outlet state
+            h_out = moist_air_enthalpy_kJ_per_kg(T_out_C, omega_out)
+
 
         m_w_cum += dm_w_kg
         Q_heater_step_kJ = Qdot_heater_kW * dt_s
@@ -91,7 +104,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
         records.append(
             {
-                "time_s": k * dt_s,
+                "time_s": k*dt_s,
                 "T_amb_C": T_amb_C,
                 "RH_amb_pct": row["RH_amb_pct"],
                 "T_mix_C": T_mix_C,

@@ -1,6 +1,7 @@
 {
   "python.envFile": "${workspaceFolder}\\.env",
   "python.analysis.extraPaths": [
+    "RQ1/src",
     "D:/Masters/RQ5/Codex_chatgpt",
     "D:/Masters/RQ5/Codex_chatgpt/src"
   ]
