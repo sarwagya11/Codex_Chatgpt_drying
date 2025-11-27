@@ -15,4 +15,11 @@ This folder contains a clean, modular Phase-1 dynamic model for the solar-assist
 2. Run a simulation with `scripts/run_phase1_simulation.py`, passing the ambient CSV and dryer settings.
 3. Inspect the output CSV for time-series states and energy metrics.
 
+For IDE linting or when executing the helper scripts directly, add `RQ1/src` to
+`PYTHONPATH` so the `rq1` package resolves correctly, e.g.:
+
+```bash
+export PYTHONPATH="$(pwd)/RQ1/src:${PYTHONPATH}"
+```
+
 All imports inside `rq1` use relative paths to keep the package self-contained. Dependencies are limited to Python 3, `numpy`, and `pandas`.

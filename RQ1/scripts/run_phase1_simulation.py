@@ -8,7 +8,11 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 SRC_ROOT = SCRIPT_DIR / "src"
-sys.path.append(str(SRC_ROOT))
+
+# Ensure the rq1 package is importable whether the script is executed from the
+# repository root or another working directory.
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
 from rq1.config import AmbientConfig, DryerConfig, KineticsConfig, SimulationConfig
 from rq1.dryer_phase1 import run_phase1_simulation
