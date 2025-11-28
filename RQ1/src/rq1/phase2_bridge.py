@@ -14,10 +14,12 @@ import pandas as pd
 
 # Repo root: .../Codex_Chatgpt_drying
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_SRC_ROOT = _PROJECT_ROOT /"RQ1"/ "src"
+_SRC_ROOT = _PROJECT_ROOT / "src"
+_SCRIPTS_ROOT = _PROJECT_ROOT / "scripts"
 
-if str(_SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SRC_ROOT))
+for _path in (str(_SRC_ROOT), str(_SCRIPTS_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from phase2_common import (  # type: ignore
     FeaturePreprocessor,
@@ -224,3 +226,4 @@ def evaluate_piecewise_midilli_Xdb(
 
     MR = evaluate_piecewise_midilli_MR(t_s, params, mr_floor=mr_floor)
     return X_eq_db + MR * (X0_db - X_eq_db)
+
