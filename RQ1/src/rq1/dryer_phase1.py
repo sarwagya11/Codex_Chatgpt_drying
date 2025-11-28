@@ -84,7 +84,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         Qdot_heater_kW = m_da * (h_in - h_mix)
 
         RH_in_frac = RH_from_T_omega(T_in_C, omega_in)
-        time_s = k * dt_s
+        # Pandas iterrows provides a Hashable index; cast to float for arithmetic safety
+        time_s = float(k) * dt_s
 
         if cfg.kinetics.mode == "phase2_midilli" and midilli_curve is not None:
             X_db_target = update_X_db_phase2_midilli(
