@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -12,6 +13,16 @@ import numpy as np
 import pandas as pd
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_SRC_ROOT = _PROJECT_ROOT / "src"
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
+from phase2_common import (  # type: ignore
+    FeaturePreprocessor,
+    build_elasticnet_design,
+    build_gbdt_matrix,
+)
+
 DEFAULT_PHASE2_MODELS_ROOT = _PROJECT_ROOT / "outputs" / "phase2" / "models"
 
 
@@ -43,6 +54,28 @@ class MidilliParams:
 
 
 _SURFACES: Optional[MidilliSurfaces] = None
+
+
+def _predict_single_target(
+    model: Any,
+    target_name: str,
+    X_proc: pd.DataFrame,
+    targets_meta: dict,
+) -> float:
+    """Predict a single target using the Phase-2 design logic."""
+
+    meta = targets_meta.get(target_name, {})
+    family = meta.get("family", "elasticnet")
+
+    if family == "elasticnet":
+        X_design = build_elasticnet_design(X_proc)
+    elif family == "gbdt":
+        X_design = build_gbdt_matrix(X_proc)
+    else:
+        X_design = X_proc.to_numpy(dtype=float)
+
+    y_pred = model.predict(X_design)
+    return float(y_pred[0])
 
 
 def load_midilli_surfaces(models_root: Path | None = None) -> MidilliSurfaces:
@@ -108,14 +141,20 @@ def predict_midilli_params_for_operating_point(
 
     X_proc = surfaces.preprocessor.transform(row)
 
-    kL = float(surfaces.model_kL.predict(X_proc)[0])
-    nL = float(surfaces.model_nL.predict(X_proc)[0])
-    bL = float(surfaces.model_bL.predict(X_proc)[0])
-    kR = float(surfaces.model_kR.predict(X_proc)[0])
-    nR = float(surfaces.model_nR.predict(X_proc)[0])
-    bR = float(surfaces.model_bR.predict(X_proc)[0])
-    offsetR = float(surfaces.model_offsetR.predict(X_proc)[0])
-    tshiftR = float(surfaces.model_tshiftR.predict(X_proc)[0])
+    targets_meta = surfaces.meta.get("targets", {})
+
+    kL = _predict_single_target(surfaces.model_kL, "kL", X_proc, targets_meta)
+    nL = _predict_single_target(surfaces.model_nL, "nL", X_proc, targets_meta)
+    bL = _predict_single_target(surfaces.model_bL, "bL", X_proc, targets_meta)
+    kR = _predict_single_target(surfaces.model_kR, "kR", X_proc, targets_meta)
+    nR = _predict_single_target(surfaces.model_nR, "nR", X_proc, targets_meta)
+    bR = _predict_single_target(surfaces.model_bR, "bR", X_proc, targets_meta)
+    offsetR = _predict_single_target(
+        surfaces.model_offsetR, "offsetR", X_proc, targets_meta
+    )
+    tshiftR = _predict_single_target(
+        surfaces.model_tshiftR, "tshiftR", X_proc, targets_meta
+    )
 
     return MidilliParams(
         kL=kL,
