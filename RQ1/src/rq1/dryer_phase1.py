@@ -10,8 +10,12 @@ import pandas as pd
 from .ambient import load_ambient_series
 from .config import SimulationConfig
 from .kinetics import (
+    MidilliCurve,
     compute_dm_w_air_capacity,
     compute_dm_w_kinetic_first_order,
+    precompute_midilli_curve_from_phase2,
+    update_X_db_first_order,
+    update_X_db_phase2_midilli,
 )
 from .psychro import (
     RH_from_T_omega,
@@ -43,11 +47,19 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
     records: List[dict] = []
 
+    total_time_s = (
+        cfg.ambient.max_steps * cfg.dryer.dt_s if cfg.ambient.max_steps is not None else len(amb_df) * cfg.dryer.dt_s
+    )
+
+    midilli_curve: MidilliCurve | None = None
+    if cfg.kinetics.mode == "phase2_midilli":
+        midilli_curve = precompute_midilli_curve_from_phase2(cfg.kinetics, total_time_s, cfg.dryer.dt_s)
+
     # Initialize recirculation state from first ambient point
-    T_amb0 = amb_df.iloc[0]["T_amb_C"]
-    RH_amb0 = amb_df.iloc[0]["RH_amb_pct"] / 100.0
-    omega_amb0 = humidity_ratio_from_T_RH(T_amb0, RH_amb0)
-    h_amb0 = moist_air_enthalpy_kJ_per_kg(T_amb0, omega_amb0)
+    T_amb0 = float(amb_df.iloc[0]["T_amb_C"])
+    RH_amb0 = float(amb_df.iloc[0]["RH_amb_pct"]) / 100.0
+    omega_amb0 = float(humidity_ratio_from_T_RH(T_amb0, RH_amb0))
+    h_amb0 = float(moist_air_enthalpy_kJ_per_kg(T_amb0, omega_amb0))
     T_e_prev_C = T_amb0
     omega_e_prev = omega_amb0
     h_e_prev = h_amb0
@@ -55,32 +67,43 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
     m_w_cum = 0.0
     Q_heater_cum_kJ = 0.0
 
-    for k, row in amb_df.iterrows():
-        T_amb_C = float(row["T_amb_C"])
-        RH_amb_frac = float(row["RH_amb_pct"]) / 100.0
-        omega_f = humidity_ratio_from_T_RH(T_amb_C, RH_amb_frac)
-        h_f = moist_air_enthalpy_kJ_per_kg(T_amb_C, omega_f)
+    for step_idx, row in enumerate(amb_df.itertuples(index=False)):
+        T_amb_C = float(row.T_amb_C)
+        RH_amb_frac = float(row.RH_amb_pct) / 100.0
+        omega_f = float(humidity_ratio_from_T_RH(T_amb_C, RH_amb_frac))
+        h_f = float(moist_air_enthalpy_kJ_per_kg(T_amb_C, omega_f))
 
-        omega_mix = (1 - r) * omega_f + r * omega_e_prev
-        h_mix = (1 - r) * h_f + r * h_e_prev
-        T_mix_C = temperature_from_h_omega_C(h_mix, omega_mix)
-        RH_mix_frac = RH_from_T_omega(T_mix_C, omega_mix)
+        omega_mix = float((1 - r) * omega_f + r * omega_e_prev)
+        h_mix = float((1 - r) * h_f + r * h_e_prev)
+        T_mix_C = float(temperature_from_h_omega_C(h_mix, omega_mix))
+        RH_mix_frac = float(RH_from_T_omega(T_mix_C, omega_mix))
 
         T_in_C = T_set_C
         omega_in = omega_mix
-        h_in = moist_air_enthalpy_kJ_per_kg(T_in_C, omega_in)
+        h_in = float(moist_air_enthalpy_kJ_per_kg(T_in_C, omega_in))
         Qdot_heater_kW = m_da * (h_in - h_mix)
 
-        RH_in_frac = RH_from_T_omega(T_in_C, omega_in)
-        dm_w_kin_kg = compute_dm_w_kinetic_first_order(
-            X_db=X_db,
-            X_eq_db=X_eq_db,
-            T_in_C=T_in_C,
-            RH_in_frac=RH_in_frac,
-            dt_s=dt_s,
-            cfg=cfg.kinetics,
-            m_p_dry_kg=m_p_dry,
-        )
+        RH_in_frac = float(RH_from_T_omega(T_in_C, omega_in))
+        time_s = float(step_idx) * dt_s
+
+        if cfg.kinetics.mode == "phase2_midilli" and midilli_curve is not None:
+            X_db_target = update_X_db_phase2_midilli(
+                time_s=time_s,
+                curve=midilli_curve,
+                X0_db=cfg.dryer.X0_db,
+                X_eq_db=X_eq_db,
+            )
+            dm_w_kin_kg = max(0.0, (X_db - X_db_target) * m_p_dry) if m_p_dry > 0 else 0.0
+        else:
+            dm_w_kin_kg = compute_dm_w_kinetic_first_order(
+                X_db=X_db,
+                X_eq_db=X_eq_db,
+                T_in_C=T_in_C,
+                RH_in_frac=RH_in_frac,
+                dt_s=dt_s,
+                cfg=cfg.kinetics,
+                m_p_dry_kg=m_p_dry,
+            )
 
         if cfg.kinetics.enable_air_limit:
             dm_w_air_max_kg = compute_dm_w_air_capacity(
@@ -108,20 +131,20 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         m_w_rate_kg_per_s = dm_w_kg / dt_s
 
         # 5) Chamber outlet air
-        omega_out = omega_in + m_w_rate_kg_per_s / m_da
+        omega_out = float(omega_in + m_w_rate_kg_per_s / m_da)
 
         # First, assume adiabatic (constant enthalpy) to get a trial state
         h_out = h_in
-        T_out_C = temperature_from_h_omega_C(h_out, omega_out)
-        RH_out_frac = RH_from_T_omega(T_out_C, omega_out)
+        T_out_C = float(temperature_from_h_omega_C(h_out, omega_out))
+        RH_out_frac = float(RH_from_T_omega(T_out_C, omega_out))
 
         # Saturation clamp: if RH_out > 1, force saturation and recompute T_out, h_out
         if RH_out_frac > 1.0:
             # Dewpoint temperature at this humidity ratio (saturated state)
-            T_out_C = dewpoint_from_omega_C(omega_out)
+            T_out_C = float(dewpoint_from_omega_C(omega_out))
             RH_out_frac = 1.0
             # Update enthalpy for the saturated outlet state
-            h_out = moist_air_enthalpy_kJ_per_kg(T_out_C, omega_out)
+            h_out = float(moist_air_enthalpy_kJ_per_kg(T_out_C, omega_out))
 
 
         m_w_cum += dm_w_kg
@@ -132,9 +155,9 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
         records.append(
             {
-                "time_s": k*dt_s,
+                "time_s": time_s,
                 "T_amb_C": T_amb_C,
-                "RH_amb_pct": row["RH_amb_pct"],
+                "RH_amb_pct": float(row.RH_amb_pct),
                 "T_mix_C": T_mix_C,
                 "RH_mix_frac": RH_mix_frac,
                 "omega_mix": omega_mix,

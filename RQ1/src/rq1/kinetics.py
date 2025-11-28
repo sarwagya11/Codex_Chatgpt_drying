@@ -4,15 +4,29 @@ from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+import numpy as np
+
 from .config import KineticsConfig
 from .knb_table import KNBTable
+from .phase2_bridge import (
+    evaluate_piecewise_midilli_MR,
+    load_midilli_surfaces,
+    predict_midilli_params_for_operating_point,
+)
 from .psychro import humidity_ratio_from_T_RH
 
 # Cache for Midilli parameter tables
 _knb_cache: Dict[Path, KNBTable] = {}
+
+
+@dataclass
+class MidilliCurve:
+    t_min: np.ndarray
+    MR: np.ndarray
 
 
 def K_eff_from_T_RH(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> float:
@@ -131,6 +145,55 @@ def compute_dm_w_kinetic_first_order(
     dX = max(0.0, X_db - X_db_new)
     dm_w_kin = max(0.0, m_p_dry_kg * dX)
     return dm_w_kin
+
+
+def precompute_midilli_curve_from_phase2(
+    kin_cfg: KineticsConfig,
+    total_time_s: float,
+    dt_s: float,
+) -> MidilliCurve:
+    """
+    Precompute MR(t) over [0, total_time_s] using Phase-2 Midilli surfaces.
+    """
+
+    load_midilli_surfaces(kin_cfg.phase2_models_root)
+    RH_mid_pct = 0.5 * (kin_cfg.RH_lo_pct_ref + kin_cfg.RH_hi_pct_ref)
+    params = predict_midilli_params_for_operating_point(
+        T_C=kin_cfg.T_C_ref,
+        v_ms=kin_cfg.v_ms_ref,
+        thickness_mm=kin_cfg.thickness_mm_ref,
+        RH_mid_pct=RH_mid_pct,
+        t_split_min=kin_cfg.t_split_min_ref,
+        models_root=kin_cfg.phase2_models_root,
+    )
+
+    t_s_grid = np.arange(0.0, total_time_s + dt_s, dt_s)
+    MR_grid = evaluate_piecewise_midilli_MR(t_s_grid, params)
+    return MidilliCurve(t_min=t_s_grid / 60.0, MR=MR_grid)
+
+
+def X_db_from_MR(
+    MR: float,
+    X0_db: float,
+    X_eq_db: float,
+) -> float:
+    return X_eq_db + MR * (X0_db - X_eq_db)
+
+
+def update_X_db_phase2_midilli(
+    time_s: float,
+    curve: MidilliCurve,
+    X0_db: float,
+    X_eq_db: float,
+) -> float:
+    """
+    Given current physical time and a precomputed MR(t) curve, return X_db(time).
+    """
+
+    time_min = time_s / 60.0
+    MR_current = float(np.interp(time_min, curve.t_min, curve.MR))
+    X_db = X_db_from_MR(MR_current, X0_db, X_eq_db)
+    return max(X_db, X_eq_db)
 
 
 def compute_dm_w_air_capacity(
