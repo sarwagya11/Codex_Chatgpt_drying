@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -12,7 +13,6 @@ import numpy as np
 from .config import KineticsConfig
 from .knb_table import KNBTable
 from .phase2_bridge import (
-    MidilliCurve,
     load_phase2_models,
     predict_segment_params,
     reconstruct_MR_piecewise_model,
