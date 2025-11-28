@@ -27,6 +27,7 @@ class DryerConfig:
 @dataclass
 class KineticsConfig:
     model_type: Literal["first_order", "midilli"] = "first_order"
+    mode: str = "first_order"  # "first_order" or "phase2_midilli"
     use_simple_K: bool = True
     use_knb_table: bool = False
     knb_csv_path: Optional[Path] = None
@@ -46,6 +47,15 @@ class KineticsConfig:
     # Operating point metadata for Midilli lookup
     v_ms: float = 1.0
     thickness_mm: float = 6.0
+
+    # Phase-2 Midilli settings
+    phase2_models_root: Optional[Path] = None
+    T_C_ref: float = 50.0
+    RH_lo_pct_ref: float = 30.0
+    RH_hi_pct_ref: float = 40.0
+    v_ms_ref: float = 1.1
+    thickness_mm_ref: float = 6.0
+    t_split_min_ref: float = 60.0
 
 
 @dataclass

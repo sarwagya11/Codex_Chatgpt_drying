@@ -56,6 +56,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir", type=Path, default=Path("RQ1/data/phase1_runs_recirc"), help="Directory to write results"
     )
+    parser.add_argument(
+        "--kinetics-mode",
+        choices=["first_order", "phase2_midilli"],
+        default="first_order",
+        help="Drying kinetics model to use.",
+    )
+    parser.add_argument("--phase2-models-root", type=Path, default=None)
+    parser.add_argument("--T_ref", type=float, default=50.0)
+    parser.add_argument("--RH_lo_ref", type=float, default=30.0)
+    parser.add_argument("--RH_hi_ref", type=float, default=40.0)
+    parser.add_argument("--v_ref", type=float, default=1.1)
+    parser.add_argument("--thickness_ref", type=float, default=6.0)
     return parser.parse_args()
 
 
@@ -94,7 +106,17 @@ def run_sweep(args: argparse.Namespace) -> Dict[float, Phase1Result]:
             dt_s=args.dt_s,
         )
 
-        kinetics_cfg = KineticsConfig(use_simple_K=True, use_knb_table=False)
+        kinetics_cfg = KineticsConfig(
+            mode=args.kinetics_mode,
+            use_simple_K=True,
+            use_knb_table=False,
+            phase2_models_root=args.phase2_models_root,
+            T_C_ref=args.T_ref,
+            RH_lo_pct_ref=args.RH_lo_ref,
+            RH_hi_pct_ref=args.RH_hi_ref,
+            v_ms_ref=args.v_ref,
+            thickness_mm_ref=args.thickness_ref,
+        )
 
         sim_cfg = SimulationConfig(
             ambient=ambient_cfg,
