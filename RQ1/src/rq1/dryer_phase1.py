@@ -10,8 +10,12 @@ import pandas as pd
 from .ambient import load_ambient_series
 from .config import SimulationConfig
 from .kinetics import (
+    MidilliCurve,
     compute_dm_w_air_capacity,
     compute_dm_w_kinetic_first_order,
+    precompute_midilli_curve_from_phase2,
+    update_X_db_first_order,
+    update_X_db_phase2_midilli,
 )
 from .psychro import (
     RH_from_T_omega,
@@ -43,6 +47,14 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
     records: List[dict] = []
 
+    total_time_s = (
+        cfg.ambient.max_steps * cfg.dryer.dt_s if cfg.ambient.max_steps is not None else len(amb_df) * cfg.dryer.dt_s
+    )
+
+    midilli_curve: MidilliCurve | None = None
+    if cfg.kinetics.mode == "phase2_midilli":
+        midilli_curve = precompute_midilli_curve_from_phase2(cfg.kinetics, total_time_s, cfg.dryer.dt_s)
+
     # Initialize recirculation state from first ambient point
     T_amb0 = amb_df.iloc[0]["T_amb_C"]
     RH_amb0 = amb_df.iloc[0]["RH_amb_pct"] / 100.0
@@ -72,15 +84,27 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         Qdot_heater_kW = m_da * (h_in - h_mix)
 
         RH_in_frac = RH_from_T_omega(T_in_C, omega_in)
-        dm_w_kin_kg = compute_dm_w_kinetic_first_order(
-            X_db=X_db,
-            X_eq_db=X_eq_db,
-            T_in_C=T_in_C,
-            RH_in_frac=RH_in_frac,
-            dt_s=dt_s,
-            cfg=cfg.kinetics,
-            m_p_dry_kg=m_p_dry,
-        )
+        # Pandas iterrows provides a Hashable index; cast to float for arithmetic safety
+        time_s = float(k) * dt_s
+
+        if cfg.kinetics.mode == "phase2_midilli" and midilli_curve is not None:
+            X_db_target = update_X_db_phase2_midilli(
+                time_s=time_s,
+                curve=midilli_curve,
+                X0_db=cfg.dryer.X0_db,
+                X_eq_db=X_eq_db,
+            )
+            dm_w_kin_kg = max(0.0, (X_db - X_db_target) * m_p_dry) if m_p_dry > 0 else 0.0
+        else:
+            dm_w_kin_kg = compute_dm_w_kinetic_first_order(
+                X_db=X_db,
+                X_eq_db=X_eq_db,
+                T_in_C=T_in_C,
+                RH_in_frac=RH_in_frac,
+                dt_s=dt_s,
+                cfg=cfg.kinetics,
+                m_p_dry_kg=m_p_dry,
+            )
 
         if cfg.kinetics.enable_air_limit:
             dm_w_air_max_kg = compute_dm_w_air_capacity(
@@ -132,7 +156,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
         records.append(
             {
-                "time_s": k*dt_s,
+                "time_s": time_s,
                 "T_amb_C": T_amb_C,
                 "RH_amb_pct": row["RH_amb_pct"],
                 "T_mix_C": T_mix_C,
