@@ -3,28 +3,16 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-import sys
 
 import joblib
 import numpy as np
 import pandas as pd
 
-# -------------------------------------------------------------------
-# Path setup: compute repo root and add <repo>/src so we can import
-# phase2_common (FeaturePreprocessor, design builders, etc.).
-#
-# This file lives at:
-#   <repo>/RQ1/src/rq1/phase2_bridge.py
-#
-# So:
-#   parents[0] -> .../rq1
-#   parents[1] -> .../RQ1/src
-#   parents[2] -> .../RQ1
-#   parents[3] -> <repo> (Codex_Chatgpt_drying)
-# -------------------------------------------------------------------
+# Repo root: .../Codex_Chatgpt_drying
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _SRC_ROOT = _PROJECT_ROOT / "src"
 _SCRIPTS_ROOT = _PROJECT_ROOT / "scripts"
@@ -33,8 +21,8 @@ for _path in (str(_SRC_ROOT), str(_SCRIPTS_ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from phase2_common import (  # type: ignore[import]
-    FeaturePreprocessor,  # imported so joblib can unpickle; may look unused
+from phase2_common import (  # type: ignore
+    FeaturePreprocessor,
     build_elasticnet_design,
     build_gbdt_matrix,
 )
@@ -72,11 +60,31 @@ class MidilliParams:
 _SURFACES: Optional[MidilliSurfaces] = None
 
 
+def _predict_single_target(
+    model: Any,
+    target_name: str,
+    X_proc: pd.DataFrame,
+    targets_meta: dict,
+) -> float:
+    """Predict a single target using the Phase-2 design logic."""
+
+    meta = targets_meta.get(target_name, {})
+    family = meta.get("family", "elasticnet")
+
+    if family == "elasticnet":
+        X_design = build_elasticnet_design(X_proc)
+    elif family == "gbdt":
+        X_design = build_gbdt_matrix(X_proc)
+    else:
+        X_design = X_proc.to_numpy(dtype=float)
+
+    y_pred = model.predict(X_design)
+    return float(y_pred[0])
+
+
 def load_midilli_surfaces(models_root: Path | None = None) -> MidilliSurfaces:
-    """
-    Load Phase-2 Midilli surfaces (preprocessor + regressors + meta.json).
-    Cache the result so we only hit disk once.
-    """
+    """Load Phase-2 Midilli surfaces and cache them."""
+    print(_PROJECT_ROOT)
     global _SURFACES
     if _SURFACES is not None:
         return _SURFACES
@@ -112,34 +120,6 @@ def load_midilli_surfaces(models_root: Path | None = None) -> MidilliSurfaces:
     return _SURFACES
 
 
-def _predict_single_target(
-    model: Any,
-    target_name: str,
-    X_proc: pd.DataFrame,
-    targets_meta: dict,
-) -> float:
-    """
-    Predict a single Midilli target (kL, nL, ...) using the same design logic
-    as in Phase-2 training.
-
-    - If family == 'elasticnet': use build_elasticnet_design(X_proc)
-    - If family == 'gbdt':      use build_gbdt_matrix(X_proc)
-    - Else:                     fall back to plain numpy array.
-    """
-    meta = targets_meta.get(target_name, {})
-    family = meta.get("family", "elasticnet")
-
-    if family == "elasticnet":
-        X_design = build_elasticnet_design(X_proc)
-    elif family == "gbdt":
-        X_design = build_gbdt_matrix(X_proc)
-    else:
-        X_design = X_proc.to_numpy(dtype=float)
-
-    y_pred = model.predict(X_design)
-    return float(y_pred[0])
-
-
 def predict_midilli_params_for_operating_point(
     T_C: float,
     v_ms: float,
@@ -148,12 +128,8 @@ def predict_midilli_params_for_operating_point(
     t_split_min: float,
     models_root: Path | None = None,
 ) -> MidilliParams:
-    """
-    Use Phase-2 surfaces to predict Midilli parameters for a single operating point.
+    """Predict Midilli parameters for a single operating point."""
 
-    Inputs must match Phase-2 feature columns (T_C, v_ms, thickness_mm, RH_mid_pct).
-    `t_split_min` is supplied by the caller; it is not predicted here.
-    """
     surfaces = load_midilli_surfaces(models_root)
 
     row = pd.DataFrame(
@@ -167,16 +143,7 @@ def predict_midilli_params_for_operating_point(
         ]
     )
 
-    # First stage: feature preprocessing
     X_proc = surfaces.preprocessor.transform(row)
-
-    # If the preprocessor returns a numpy array, wrap it into a DataFrame
-    # with output columns from the preprocessor (Phase-2 stores these).
-    if isinstance(X_proc, np.ndarray):
-        cols = getattr(surfaces.preprocessor, "output_columns_", None)
-        if cols is None:
-            raise RuntimeError("Preprocessor did not expose output_columns_.")
-        X_proc = pd.DataFrame(X_proc, columns=cols)
 
     targets_meta = surfaces.meta.get("targets", {})
 
@@ -186,8 +153,12 @@ def predict_midilli_params_for_operating_point(
     kR = _predict_single_target(surfaces.model_kR, "kR", X_proc, targets_meta)
     nR = _predict_single_target(surfaces.model_nR, "nR", X_proc, targets_meta)
     bR = _predict_single_target(surfaces.model_bR, "bR", X_proc, targets_meta)
-    offsetR = _predict_single_target(surfaces.model_offsetR, "offsetR", X_proc, targets_meta)
-    tshiftR = _predict_single_target(surfaces.model_tshiftR, "tshiftR", X_proc, targets_meta)
+    offsetR = _predict_single_target(
+        surfaces.model_offsetR, "offsetR", X_proc, targets_meta
+    )
+    tshiftR = _predict_single_target(
+        surfaces.model_tshiftR, "tshiftR", X_proc, targets_meta
+    )
 
     return MidilliParams(
         kL=kL,
@@ -203,13 +174,9 @@ def predict_midilli_params_for_operating_point(
 
 
 def _midilli_curve(t_min: np.ndarray, k: float, n: float, b: float) -> np.ndarray:
-    """
-    Standard Midilli MR curve:
-        MR(t) = exp(-k * t^n) + b * t
-    where t is in minutes.
-    """
+    """Standard Midilli MR curve."""
+
     t = np.asarray(t_min, dtype=float)
-    t = np.clip(t, 0.0, None)
     return np.exp(-k * np.power(t, n)) + b * t
 
 
@@ -218,16 +185,9 @@ def evaluate_piecewise_midilli_MR(
     params: MidilliParams,
     mr_floor: float = 0.0,
 ) -> np.ndarray:
-    """
-    Evaluate the piecewise Midilli MR(t) for an array of times in seconds.
+    """Evaluate piecewise Midilli MR(t) on a global time axis."""
 
-    Global time axis logic mirrors src/phase2c_predict.py:
-    - Left segment uses (kL, nL, bL) from t=0 up to t_split_min.
-    - Right segment uses (kR, nR, bR) with a time shift and a vertical offset.
-    - Right segment becomes active after t_split_min + right_time_shift_at_boundary_min.
-    """
     t_min = np.asarray(t_s, dtype=float) / 60.0
-
     kL = params.kL
     nL = params.nL
     bL = params.bL
@@ -238,11 +198,9 @@ def evaluate_piecewise_midilli_MR(
     tshift = params.right_time_shift_at_boundary_min
     t_split = params.t_split_min
 
-    # Left segment
     tL = np.clip(t_min, 0.0, t_split)
     MR_L = _midilli_curve(tL, kL, nL, bL)
 
-    # Right segment: local time starts at join_time_right_min
     join_time_right_min = t_split + tshift
     tR_local = np.maximum(0.0, t_min - join_time_right_min)
     MR_R_raw = _midilli_curve(tR_local, kR, nR, bR)
@@ -264,10 +222,8 @@ def evaluate_piecewise_midilli_Xdb(
     X_eq_db: float,
     mr_floor: float = 0.0,
 ) -> np.ndarray:
-    """
-    Convert MR(t) into dry-basis moisture content X_db(t):
-        X_db(t) = X_eq_db + MR(t) * (X0_db - X_eq_db)
-    """
+    """Map MR(t) to dry-basis moisture content X_db(t)."""
+
     MR = evaluate_piecewise_midilli_MR(t_s, params, mr_floor=mr_floor)
     return X_eq_db + MR * (X0_db - X_eq_db)
 
