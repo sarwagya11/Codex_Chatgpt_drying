@@ -17,6 +17,7 @@ from .phase2_bridge import (
     load_midilli_surfaces,
     predict_midilli_params_for_operating_point,
 )
+
 from .psychro import humidity_ratio_from_T_RH
 
 # Cache for Midilli parameter tables
@@ -156,8 +157,12 @@ def precompute_midilli_curve_from_phase2(
     Precompute MR(t) over [0, total_time_s] using Phase-2 Midilli surfaces.
     """
 
+    # Make sure models are loaded once
     load_midilli_surfaces(kin_cfg.phase2_models_root)
+
+    # Use the mid-RH between RH_lo and RH_hi as the operating RH for the bridge
     RH_mid_pct = 0.5 * (kin_cfg.RH_lo_pct_ref + kin_cfg.RH_hi_pct_ref)
+
     params = predict_midilli_params_for_operating_point(
         T_C=kin_cfg.T_C_ref,
         v_ms=kin_cfg.v_ms_ref,
@@ -167,9 +172,12 @@ def precompute_midilli_curve_from_phase2(
         models_root=kin_cfg.phase2_models_root,
     )
 
+    # Global time grid in seconds, then convert to minutes for the MidilliCurve struct
     t_s_grid = np.arange(0.0, total_time_s + dt_s, dt_s)
     MR_grid = evaluate_piecewise_midilli_MR(t_s_grid, params)
+
     return MidilliCurve(t_min=t_s_grid / 60.0, MR=MR_grid)
+
 
 
 def X_db_from_MR(
