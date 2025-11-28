@@ -68,9 +68,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
     Q_heater_cum_kJ = 0.0
 
     for step_idx, row in enumerate(amb_df.itertuples(index=False)):
-        row_series = row._asdict()
-        T_amb_C = float(row_series["T_amb_C"])
-        RH_amb_frac = float(row_series["RH_amb_pct"]) / 100.0
+        T_amb_C = float(row.T_amb_C)
+        RH_amb_frac = float(row.RH_amb_pct) / 100.0
         omega_f = humidity_ratio_from_T_RH(T_amb_C, RH_amb_frac)
         h_f = moist_air_enthalpy_kJ_per_kg(T_amb_C, omega_f)
 
@@ -158,7 +157,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             {
                 "time_s": time_s,
                 "T_amb_C": T_amb_C,
-                "RH_amb_pct": row_series["RH_amb_pct"],
+                "RH_amb_pct": float(row.RH_amb_pct),
                 "T_mix_C": T_mix_C,
                 "RH_mix_frac": RH_mix_frac,
                 "omega_mix": omega_mix,
