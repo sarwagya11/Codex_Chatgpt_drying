@@ -163,6 +163,9 @@ def _bound_key_for_target(name: str) -> str | None:
 
 
 def _apply_bounds(values: np.ndarray, bound_key: str | None, meta: Dict[str, Any]) -> np.ndarray:
+    if bound_key is None:
+        return values
+
     bounds_map = meta.get("bounds", {}) if isinstance(meta, dict) else {}
     bounds = bounds_map.get(bound_key)
     if bounds is None:
