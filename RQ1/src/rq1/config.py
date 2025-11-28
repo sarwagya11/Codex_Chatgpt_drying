@@ -55,6 +55,7 @@ class KineticsConfig:
     RH_hi_pct_ref: float = 40.0
     v_ms_ref: float = 1.1
     thickness_mm_ref: float = 6.0
+    t_split_min_ref: float = 60.0
 
 
 @dataclass
