@@ -37,7 +37,7 @@ def main() -> None:
     args = parse_args()
 
     phase1_df = pd.read_csv(args.phase1_csv)
-    params = midilli_table.load_midilli_row(args.table_csv, args.row_id)
+    params = midilli_table.load_midilli_rows(args.table_csv, args.row_id)
 
     time_min = phase1_df["time_s"].to_numpy(dtype=float) / 60.0
     MR_midilli = params.evaluate_MR(time_min, mr_floor=args.mr_floor)
