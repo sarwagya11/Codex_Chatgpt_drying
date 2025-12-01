@@ -12,7 +12,7 @@ import numpy as np
 
 from .config import KineticsConfig
 from .knb_table import KNBTable
-from .phase2_bridge import (
+from .midilli_table import (
     evaluate_piecewise_midilli_MR,
     load_midilli_surfaces,
     predict_midilli_params_for_operating_point,
