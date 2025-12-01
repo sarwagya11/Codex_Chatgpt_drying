@@ -1,4 +1,4 @@
-"""Apply a Midilli curve (from Phase-2 table) to a Phase-1 time grid."""
+"""Evaluate Midilli curves from a chamber table row."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -16,19 +17,42 @@ SRC_ROOT = SCRIPT_DIR / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from rq1 import midilli_table
+from rq1 import midilli_table  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase1-csv", type=Path, required=True, help="Path to Phase-1 simulation CSV")
-    parser.add_argument("--table-csv", type=Path, required=True, help="Path to Phase-2 Midilli table CSV")
-    parser.add_argument("--row-id", type=int, required=True, help="Row index in the Midilli table to use")
-    parser.add_argument("--X0-db", type=float, required=True, help="Initial dry-basis moisture content")
-    parser.add_argument("--Xeq-db", type=float, required=True, help="Equilibrium dry-basis moisture content")
-    parser.add_argument("--mr-floor", type=float, default=0.0, help="Minimum MR clamp for Midilli curve")
+    parser.add_argument("table_csv", type=Path, help="Path to phase2c_for_chamber.csv")
+    parser.add_argument("row_id", type=str, help="Row identifier to extract")
     parser.add_argument(
-        "--output", type=Path, required=True, help="Destination CSV path to write augmented Phase-1 results"
+        "--total-time-s",
+        type=float,
+        default=3600.0,
+        help="Total time window (s) for evaluation",
+    )
+    parser.add_argument(
+        "--dt-s",
+        type=float,
+        default=10.0,
+        help="Time step (s) for the output grid",
+    )
+    parser.add_argument(
+        "--X0-db",
+        type=float,
+        default=None,
+        help="Optional initial moisture content (dry basis) to compute X_db",
+    )
+    parser.add_argument(
+        "--Xeq-db",
+        type=float,
+        default=None,
+        help="Optional equilibrium moisture content (dry basis) to compute X_db",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("midilli_curve.csv"),
+        help="Output CSV path",
     )
     return parser.parse_args()
 
@@ -36,20 +60,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    phase1_df = pd.read_csv(args.phase1_csv)
-    params = midilli_table.load_midilli_rows(args.table_csv, args.row_id)
+    rows = midilli_table.load_midilli_rows(args.table_csv)
+    try:
+        params = rows[args.row_id]
+    except KeyError as exc:
+        raise SystemExit(f"Row id '{args.row_id}' not found in {args.table_csv}") from exc
 
-    time_min = phase1_df["time_s"].to_numpy(dtype=float) / 60.0
-    MR_midilli = params.evaluate_MR(time_min, mr_floor=args.mr_floor)
-    X_db_midilli = midilli_table.X_db_from_MR(MR_midilli, X0_db=args.X0_db, X_eq_db=args.Xeq_db)
+    t_s = pd.Series(np.arange(0.0, args.total_time_s + args.dt_s, args.dt_s))
+    MR = pd.Series(midilli_table.evaluate_piecewise_midilli_MR(t_s.values, params))
 
-    phase1_df["MR_midilli"] = MR_midilli
-    phase1_df["X_db_midilli"] = X_db_midilli
+    df = pd.DataFrame({
+        "time_s": t_s,
+        "time_min": t_s / 60.0,
+        "MR": MR,
+    })
+
+    if args.X0_db is not None and args.Xeq_db is not None:
+        df["X_db"] = midilli_table.X_db_from_MR(df["MR"].to_numpy(), args.X0_db, args.Xeq_db)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    phase1_df.to_csv(args.output, index=False)
-
-    print(args.output)
+    df.to_csv(args.output, index=False)
+    print(f"Wrote Midilli curve for row '{args.row_id}' to {args.output}")
 
 
 if __name__ == "__main__":
