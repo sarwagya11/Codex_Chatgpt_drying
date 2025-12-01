@@ -5,6 +5,7 @@ __all__ = [
     "ambient",
     "kinetics",
     "knb_table",
+    "midilli_table",
     "dryer_phase1",
     "scenarios",
 ]
