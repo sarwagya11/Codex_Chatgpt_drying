@@ -1,201 +1,43 @@
-"""Lookup and utilities for loading phase2C Midilli parameters."""
+"""Utility helpers for evaluating Midilli curves from a parameter table."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Mapping
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 
-PHASE2C_FILENAME = "phase2c_for_chamber.csv"
-
 
 @dataclass
-class MidilliRow:
-    """Container for a single row of the phase2c chamber table."""
+class MidilliParams:
+    """Container for Midilli parameters."""
 
-    id: str
-    T_C: float
-    RH_mid_pct: float
-    v_ms: float
-    thickness_mm: float
-    t_split: float
-    kL: float
-    nL: float
-    bL_used: float
-    is_page_L: bool
-    kR: float
-    nR: float
-    bR_used: float
-    is_page_R: bool
-    offsetR_at_join: float
-    right_time_shift_at_boundary: float
+    k: float
+    n: float
+    b: float
 
-    @property
-    def left_params(self) -> Mapping[str, float]:
-        return {"k": self.kL, "n": self.nL, "b": self.bL_used}
+    def evaluate_MR(self, time_min: Iterable[float], mr_floor: float = 0.0) -> np.ndarray:
+        """Return MR(t) on the supplied time grid (in minutes)."""
 
-    @property
-    def right_params(self) -> Mapping[str, float]:
-        return {"k": self.kR, "n": self.nR, "b": self.bR_used}
+        t_arr = np.asarray(time_min, dtype=float)
+        MR = np.exp(-self.k * np.power(np.maximum(t_arr, 0.0), self.n)) + self.b * np.maximum(t_arr, 0.0)
+        return np.maximum(MR, mr_floor)
 
 
-_table_cache: Dict[Path, Dict[str, MidilliRow]] = {}
+def load_midilli_row(table_csv: Path, row_id: int) -> MidilliParams:
+    """Load a single Midilli parameter row from ``table_csv`` by integer index."""
+
+    df = pd.read_csv(table_csv)
+    if row_id < 0 or row_id >= len(df):
+        raise IndexError(f"row_id {row_id} is out of bounds for table of length {len(df)}")
+
+    row = df.iloc[row_id]
+    return MidilliParams(k=float(row["k"]), n=float(row["n"]), b=float(row.get("b", 0.0)))
 
 
-def _ensure_bool(value: object) -> bool:
-    return bool(int(value)) if isinstance(value, (int, np.integer)) else bool(value)
+def X_db_from_MR(MR: np.ndarray, X0_db: float, X_eq_db: float) -> np.ndarray:
+    """Convert moisture ratio array to dry-basis moisture content."""
 
-
-def _row_from_series(row: pd.Series) -> MidilliRow:
-    return MidilliRow(
-        id=str(row["id"]),
-        T_C=float(row["T_C"]),
-        RH_mid_pct=float(row["RH_mid_pct"]),
-        v_ms=float(row["v_ms"]),
-        thickness_mm=float(row["thickness_mm"]),
-        t_split=float(row["t_split"]),
-        kL=float(row["kL"]),
-        nL=float(row["nL"]),
-        bL_used=float(row["bL_used"]),
-        is_page_L=_ensure_bool(row["is_page_L"]),
-        kR=float(row["kR"]),
-        nR=float(row["nR"]),
-        bR_used=float(row["bR_used"]),
-        is_page_R=_ensure_bool(row["is_page_R"]),
-        offsetR_at_join=float(row["offsetR_at_join"]),
-        right_time_shift_at_boundary=float(row["right_time_shift_at_boundary"]),
-    )
-
-
-def load_midilli_rows(csv_path: Path | str) -> Dict[str, MidilliRow]:
-    """Load Midilli rows from ``phase2c_for_chamber.csv`` and check ``id`` uniqueness."""
-
-    df = pd.read_csv(csv_path)
-    if "id" not in df.columns:
-        raise ValueError("phase2c table must include an 'id' column")
-
-    duplicates = df[df["id"].duplicated()]["id"].unique()
-    if duplicates.size:
-        dup_list = ", ".join(str(x) for x in duplicates)
-        raise ValueError(f"Duplicate id entries found: {dup_list}")
-
-    return {str(row["id"]): _row_from_series(row) for _, row in df.iterrows()}
-
-
-def load_midilli_surfaces(models_root: Path | None) -> Dict[str, MidilliRow]:
-    """Load and cache the chamber Midilli table."""
-
-    if models_root is None:
-        raise FileNotFoundError("models_root is required to resolve phase2c_for_chamber.csv")
-
-    root = Path(models_root)
-    csv_path = root / PHASE2C_FILENAME
-    if csv_path not in _table_cache:
-        _table_cache[csv_path] = load_midilli_rows(csv_path)
-    return _table_cache[csv_path]
-
-
-def _select_row_nearest(
-    table: Mapping[str, MidilliRow],
-    target: Iterable[float],
-) -> MidilliRow:
-    features = np.array(
-        [
-            [
-                row.T_C,
-                row.RH_mid_pct,
-                row.v_ms,
-                row.thickness_mm,
-                row.t_split,
-            ]
-            for row in table.values()
-        ],
-        dtype=float,
-    )
-    target_arr = np.asarray(list(target), dtype=float)
-    distances = np.sum((features - target_arr) ** 2, axis=1)
-    best_idx = int(np.argmin(distances))
-    return list(table.values())[best_idx]
-
-
-def predict_midilli_params_for_operating_point(
-    T_C: float,
-    v_ms: float,
-    thickness_mm: float,
-    RH_mid_pct: float,
-    t_split_min: float,
-    models_root: Path | None,
-    identifier: str | None = None,
-) -> MidilliRow:
-    """Select Midilli parameters from the cached table by ``identifier`` or nearest neighbor."""
-
-    table = load_midilli_surfaces(models_root)
-    if identifier is not None:
-        try:
-            return table[identifier]
-        except KeyError as exc:
-            raise KeyError(f"No Midilli row with id '{identifier}'") from exc
-
-    return _select_row_nearest(table, (T_C, RH_mid_pct, v_ms, thickness_mm, t_split_min))
-
-
-def midilli_curve(time: Iterable[float] | np.ndarray, k: float, n: float, b: float, is_page: bool) -> np.ndarray:
-    """Evaluate the Midilli (or Page when ``is_page``) curve."""
-
-    t = np.asarray(time, dtype=float)
-    safe_t = np.maximum(t, 0.0)
-    base = np.exp(-k * np.power(safe_t, n))
-    return base if is_page else base + b * safe_t
-
-
-def reconstruct_piecewise_mr(
-    time_min: Iterable[float] | np.ndarray,
-    row: MidilliRow,
-    mr_floor: float = 0.0,
-    mr_ceiling: float | None = 1.0,
-) -> np.ndarray:
-    """Reconstruct a piecewise Midilli curve using absolute time."""
-
-    time_arr = np.asarray(time_min, dtype=float)
-    MR_L = midilli_curve(time_arr, row.kL, row.nL, row.bL_used, row.is_page_L)
-
-    MR_R_shifted = np.zeros_like(time_arr)
-    right_mask = time_arr >= row.t_split
-    if right_mask.any():
-        right_times = time_arr[right_mask].copy()
-        right_times[0] = max(right_times[0] + row.right_time_shift_at_boundary, 0.0)
-        right_vals = midilli_curve(right_times, row.kR, row.nR, row.bR_used, row.is_page_R)
-        MR_R_shifted[right_mask] = right_vals + row.offsetR_at_join
-
-    MR_final = MR_L.copy()
-    if right_mask.any():
-        MR_final[right_mask] = np.minimum.accumulate(MR_R_shifted[right_mask])
-
-    if mr_floor > 0:
-        MR_final = np.maximum(MR_final, mr_floor)
-    if mr_ceiling is not None:
-        MR_final = np.minimum(MR_final, mr_ceiling)
-
-    return MR_final
-
-
-def evaluate_piecewise_midilli_MR(
-    time_s: Iterable[float] | np.ndarray,
-    params: MidilliRow,
-    mr_floor: float = 0.0,
-    mr_ceiling: float | None = 1.0,
-) -> np.ndarray:
-    """Evaluate MR(t) using ``params`` on a seconds grid."""
-
-    time_min = np.asarray(time_s, dtype=float) / 60.0
-    return reconstruct_piecewise_mr(time_min, params, mr_floor=mr_floor, mr_ceiling=mr_ceiling)
-
-
-def X_db_from_MR(MR: Iterable[float] | np.ndarray, X0_db: float, X_eq_db: float) -> np.ndarray:
-    """Convert moisture ratio to dry-basis moisture content."""
-
-    MR_arr = np.asarray(MR, dtype=float)
-    return X_eq_db + MR_arr * (X0_db - X_eq_db)
+    return X_eq_db + np.asarray(MR, dtype=float) * (X0_db - X_eq_db)
