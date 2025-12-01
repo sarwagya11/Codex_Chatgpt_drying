@@ -31,6 +31,7 @@ LOGGER = logging.getLogger("phase2.predict")
 
 DEFAULT_MODELS_DIR = Path(r"D:\Masters\RQ5\Codex_Chatgpt_drying\outputs\phase2\models")
 DEFAULT_OUT_DIR    = Path(r"D:\Masters\RQ5\Codex_Chatgpt_drying\outputs\phase2\predict_demo")
+CHAMBER_OUT_DIR    = Path(r"D:\Masters\RQ5\Codex_Chatgpt_drying\RQ1\outputs")
 
 TARGET_ORDER = [
     "kL","nL","bL",
@@ -168,6 +169,8 @@ def main(argv: List[str] | None = None) -> None:
     if missing:
         raise ValueError(f"Operating point CSV missing columns: {', '.join(sorted(missing))}")
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    # Collect per-run outputs for drying chamber
+    chamber_rows: List[Dict[str, Any]] = []
 
     for _, row in ops_df.iterrows():
         identifier = row["id"]
@@ -262,7 +265,32 @@ def main(argv: List[str] | None = None) -> None:
                 observed = raw_df
             except Exception:
                 observed = None
-
+        # --- Add one row for drying-chamber use (model scenario only) ---
+        # scenarios[0] is the "model" tshift + offset we actually use.
+        model_scn = scenarios[0]
+        chamber_rows.append(
+            {
+                "id": identifier,
+                "T_C": float(row["T_C"]),
+                "RH_mid_pct": float(row["RH_mid_pct"]),
+                "v_ms": float(row["v_ms"]),
+                "thickness_mm": float(row["thickness_mm"]),
+                "t_split": float(t_split),
+                "kL": float(kL),
+                "nL": float(nL),
+                "bL_used": float(bL),
+                "is_page_L": bool(is_page_L),
+                "kR": float(kR),
+                "nR": float(nR),
+                "bR_used": float(bR),
+                "is_page_R": bool(is_page_R),
+                # Use the *actual* offset and tshift used in reconstruction,
+                # not the raw predicted ones.
+                "offsetR_at_join": float(model_scn["offset"]),
+                "right_time_shift_at_boundary": float(model_scn["tshift"]),
+            }
+        )
+        # ---------------------------------------------------------------
         segment = np.where(time_grid <= t_split, "left", "right")
         df_rows = []
         for scenario in scenarios:
@@ -348,6 +376,26 @@ def main(argv: List[str] | None = None) -> None:
         plt.savefig(args.out_dir / f"{identifier}_prediction.png", dpi=150)
         plt.close()
 
+        # ---- Write consolidated kinetics table for drying chamber ----
+    if chamber_rows:
+        CHAMBER_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        chamber_df = pd.DataFrame(chamber_rows)
+
+        # Keep a clean, ordered subset of columns
+        cols = [
+            "id",
+            "T_C", "RH_mid_pct", "v_ms", "thickness_mm",
+            "t_split",
+            "kL", "nL", "bL_used", "is_page_L",
+            "kR", "nR", "bR_used", "is_page_R",
+            "offsetR_at_join",
+            "right_time_shift_at_boundary",
+        ]
+        chamber_df[cols].to_csv(
+            CHAMBER_OUT_DIR / "phase2c_for_chamber.csv",
+            index=False,
+        )
+    # ----------------------------------------------------------------
 
     write_run_meta(args.out_dir, list(sys.argv))
 
