@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--kinetics-mode",
         choices=["first_order", "phase2_midilli"],
-        default="first_order",
+        default="phase2_midilli",
         help="Drying kinetics model to use.",
     )
     parser.add_argument("--phase2-models-root", type=Path, default=None)

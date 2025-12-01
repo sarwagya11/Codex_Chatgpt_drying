@@ -35,6 +35,19 @@ def parse_args() -> argparse.Namespace:
         "--output", type=Path, default=Path("RQ1/data/phase1_runs/phase1_output.csv"),
         help="Path to write simulation results CSV",
     )
+    parser.add_argument(
+        "--kinetics-mode",
+        choices=["phase2_midilli"],
+        default="phase2_midilli",
+        help="Drying kinetics model to use.",
+    )
+    parser.add_argument(
+        "--phase2-models-root",
+        type=Path,
+        default=None,
+        help="Root folder for Phase-2 models (default: outputs/phase2/models)",
+    )
+
     return parser.parse_args()
 
 
@@ -57,7 +70,13 @@ def main() -> None:
         dt_s=args.dt_s,
     )
 
-    kinetics_cfg = KineticsConfig(use_simple_K=True, use_knb_table=False)
+    kinetics_cfg = KineticsConfig(
+    mode=args.kinetics_mode,
+    use_simple_K=True,          # again, ignored for phase2_midilli
+    use_knb_table=False,
+    phase2_models_root=args.phase2_models_root,
+)
+
 
     sim_cfg = SimulationConfig(
         ambient=ambient_cfg,
