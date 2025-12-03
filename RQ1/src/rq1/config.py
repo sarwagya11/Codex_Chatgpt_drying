@@ -29,7 +29,7 @@ class KineticsConfig:
     mode: Literal["phase2_midilli", "first_order"] = "phase2_midilli"
     model_type: Literal["first_order", "midilli"] = "first_order"
     use_simple_K: bool = True
-    use_knb_table: bool = False
+    use_knb_table: bool = True
     knb_csv_path: Optional[Path] = None
 
     # Existing first-order parameters
@@ -54,8 +54,8 @@ class KineticsConfig:
     v_ms_ref: float = 1.1
     thickness_mm_ref: float = 6.0
     # Reference moisture levels used for K_eff extraction
-    X0_db_ref: float = 2.5
-    X_eq_db_ref: float = 0.05
+    X0_db_ref: float = 6.5
+    X_eq_db_ref: float = 0.0
     T_C_ref: float = 50.0
     RH_lo_pct_ref: float = 30.0
     RH_hi_pct_ref: float = 40.0
