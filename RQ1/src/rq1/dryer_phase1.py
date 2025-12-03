@@ -74,6 +74,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
         RH_in_frac = float(RH_from_T_omega(T_in_C, omega_in))
         time_s = float(step_idx) * dt_s
+        print(f"r={r:.2f}, t={time_s/60:.1f} min, RH_in={RH_in_frac*100:.1f}%")
 
         dm_w_kin_kg = compute_dm_w_kinetic_first_order(
             X_db=X_db,
