@@ -92,6 +92,26 @@ def plot_humidity_and_MR(
         ax_rh.plot(times_min, 100.0 * df["RH_out_frac"], label=f"r = {r:.2f}")
         ax_mr.plot(times_min, df["MR"], label=f"r = {r:.2f}")
 
+        if {"X_tray_0", "X_tray_last"}.issubset(df.columns):
+            X0_first = df["X_tray_0"].iloc[0]
+            X0_last = df["X_tray_last"].iloc[0]
+
+            if X0_first != 0:
+                ax_mr.plot(
+                    times_min,
+                    df["X_tray_0"] / X0_first,
+                    linestyle="--",
+                    label=f"Tray 0 (norm), r={r:.2f}",
+                )
+
+            if X0_last != 0:
+                ax_mr.plot(
+                    times_min,
+                    df["X_tray_last"] / X0_last,
+                    linestyle=":",
+                    label=f"Tray last (norm), r={r:.2f}",
+                )
+
     ax_rh.set_title("Outlet relative humidity")
     ax_rh.set_xlabel("Time [min]")
     ax_rh.set_ylabel("Outlet RH [%]")
