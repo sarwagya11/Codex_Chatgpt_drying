@@ -58,6 +58,12 @@ class KineticsConfig:
     RH_min_valid_frac: float = 0.25
     RH_max_valid_frac: float = 0.45
 
+    # Valid box for Phase-2-derived K_eff usage
+    keff_valid_T_min_C: float = 35.0
+    keff_valid_T_max_C: float = 60.0
+    keff_valid_RH_min_frac: float = 0.20
+    keff_valid_RH_max_frac: float = 0.60
+
     Ea_over_R_K: float | None = 3839.0
     max_RH_scale: float = 1.5
 

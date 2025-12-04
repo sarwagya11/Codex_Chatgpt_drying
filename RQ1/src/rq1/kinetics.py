@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -63,10 +62,28 @@ def get_keff_table(cfg: KineticsConfig) -> pd.DataFrame:
 def _inside_valid_box(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> bool:
     """Return True if (T, RH) are inside the Phase-2 validity box."""
 
-    return (
-        cfg.T_min_valid_C <= T_in_C <= cfg.T_max_valid_C
-        and cfg.RH_min_valid_frac <= RH_in_frac <= cfg.RH_max_valid_frac
-    )
+    T_min = getattr(cfg, "keff_valid_T_min_C", cfg.T_min_valid_C)
+    T_max = getattr(cfg, "keff_valid_T_max_C", cfg.T_max_valid_C)
+    RH_min = getattr(cfg, "keff_valid_RH_min_frac", cfg.RH_min_valid_frac)
+    RH_max = getattr(cfg, "keff_valid_RH_max_frac", cfg.RH_max_valid_frac)
+
+    return T_min <= T_in_C <= T_max and RH_min <= RH_in_frac <= RH_max
+
+
+def _nearest_keff_row(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> Optional[pd.Series]:
+    """Return nearest-neighbour row from Phase-2-derived K_eff table if available."""
+
+    if not cfg.use_knb_table or cfg.phase2_models_root is None:
+        return None
+
+    table = get_keff_table(cfg)
+    if table.empty:
+        return None
+
+    RH_pct = RH_in_frac * 100.0
+    dist2 = (table["T_C"] - T_in_C) ** 2 + (table["RH_mid_pct"] - RH_pct) ** 2
+    idx = int(dist2.values.argmin())
+    return table.iloc[idx]
 
 
 def K_eff_from_T_RH(
@@ -75,44 +92,10 @@ def K_eff_from_T_RH(
     cfg: KineticsConfig,
 ) -> float:
     """
-    Return effective first-order drying coefficient K_eff [1/s].
-
-    If cfg.use_knb_table and cfg.phase2_models_root is set, select K_eff from the
-    Phase-2-derived table (nearest neighbour in T/RH) and optionally apply
-    guardrail scaling when outside the calibrated validity box.
-
-    Otherwise, fall back to the existing simple exponential law in T and RH.
+    Return effective first-order drying coefficient K_eff [1/s] using the
+    simple Arrhenius-like exponential temperature dependency and RH scaling
+    used as a guardrail outside the Phase-2 validity box.
     """
-
-    if cfg.use_knb_table and cfg.phase2_models_root is not None:
-        table = get_keff_table(cfg)
-        if table.empty:
-            warnings.warn("K_eff table is empty; falling back to simple law.")
-        else:
-            RH_pct = RH_in_frac * 100.0
-            dist2 = (table["T_C"] - T_in_C) ** 2 + (table["RH_mid_pct"] - RH_pct) ** 2
-            idx = int(dist2.values.argmin())
-            row = table.iloc[idx]
-
-            base_K = float(row["K_eff_1_per_s"])
-            if base_K <= 0.0:
-                base_K = cfg.K_min_1_per_s
-
-            T_base_C = float(row["T_C"])
-            RH_base_frac = float(row["RH_mid_pct"]) / 100.0
-
-            if _inside_valid_box(T_in_C, RH_in_frac, cfg):
-                return max(cfg.K_min_1_per_s, base_K)
-
-            K_guard, _flags = get_K_eff_from_state(
-                base_K_1_per_s=base_K,
-                T_in_C=T_in_C,
-                RH_in_frac=RH_in_frac,
-                cfg=cfg,
-                T_base_C=T_base_C,
-                RH_base_frac=RH_base_frac,
-            )
-            return max(cfg.K_min_1_per_s, K_guard)
 
     K_ref = cfg.K_ref_1_per_s
     dT = T_in_C - cfg.T_ref_C
@@ -120,6 +103,33 @@ def K_eff_from_T_RH(
     f_RH = math.exp(-cfg.alpha_RH * RH_in_frac)
     K_eff = max(cfg.K_min_1_per_s, K_T * f_RH)
     return K_eff
+
+
+def keff_from_state(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> float:
+    """Return k_eff using table inside validity box and guardrail outside."""
+
+    row = _nearest_keff_row(T_in_C, RH_in_frac, cfg)
+    if row is not None:
+        base_K = float(row["K_eff_1_per_s"])
+        if base_K <= 0.0:
+            base_K = cfg.K_min_1_per_s
+        T_base_C = float(row["T_C"])
+        RH_base_frac = float(row["RH_mid_pct"]) / 100.0
+
+        if _inside_valid_box(T_in_C, RH_in_frac, cfg):
+            return max(cfg.K_min_1_per_s, base_K)
+
+        K_guard, _ = get_K_eff_from_state(
+            base_K_1_per_s=base_K,
+            T_in_C=T_in_C,
+            RH_in_frac=RH_in_frac,
+            cfg=cfg,
+            T_base_C=T_base_C,
+            RH_base_frac=RH_base_frac,
+        )
+        return max(cfg.K_min_1_per_s, K_guard)
+
+    return K_eff_from_T_RH(T_in_C, RH_in_frac, cfg)
 
 
 def get_K_eff_from_state(
@@ -255,27 +265,8 @@ def compute_dm_w_kinetic_first_order(
     place via KNB tables, but the drying update still follows a first-order form.
     """
 
-    K_eff_override: Optional[float] = None
-    if cfg.model_type == "midilli":
-        midilli_params = get_midilli_params_for_state(T_in_C, RH_in_frac, cfg)
-        if midilli_params is not None:
-            k_midilli, _, _ = midilli_params
-            RH_base_frac = 0.5 * (cfg.RH_lo_pct_ref + cfg.RH_hi_pct_ref) / 100.0
-            T_base_C = cfg.T_C_ref
-            K_eff_override, flags = get_K_eff_from_state(
-                base_K_1_per_s=k_midilli,
-                T_in_C=T_in_C,
-                RH_in_frac=RH_in_frac,
-                cfg=cfg,
-                RH_base_frac=RH_base_frac,
-                T_base_C=T_base_C,
-            )
-            # TODO: expose flags in simulation outputs for diagnostics
-        else:
-            warnings.warn(
-                "Midilli model selected but no KNB table available; falling back to simple kinetics.",
-                RuntimeWarning,
-            )
+    RH_in_frac = max(0.0, min(1.0, RH_in_frac))
+    k_eff = keff_from_state(T_in_C=T_in_C, RH_in_frac=RH_in_frac, cfg=cfg)
 
     X_db_new = update_X_db_first_order(
         X_db=X_db,
@@ -284,7 +275,7 @@ def compute_dm_w_kinetic_first_order(
         RH_in_frac=RH_in_frac,
         dt_s=dt_s,
         cfg=cfg,
-        K_eff_override=K_eff_override,
+        K_eff_override=k_eff,
     )
 
     dX = max(0.0, X_db - X_db_new)
