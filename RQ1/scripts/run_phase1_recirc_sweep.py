@@ -34,7 +34,9 @@ from rq1.config import AmbientConfig, DryerConfig, KineticsConfig, SimulationCon
 from rq1.dryer_phase1 import Phase1Result, run_phase1_simulation
 from rq1.phase1_plots import (
     plot_energy_and_water,
+    plot_air_trays_per_r,
     plot_humidity_and_MR,
+    plot_MR_trays_per_r,
     plot_temperatures,
     summarize_SEC_vs_r,
 )
@@ -52,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--Xeq", type=float, required=True, help="Equilibrium moisture content (dry basis)")
     parser.add_argument("--m_p_dry", type=float, required=True, help="Dry mass of product [kg]")
     parser.add_argument("--dt_s", type=float, required=True, help="Time step [s]")
+    parser.add_argument("--n-trays", type=int, default=1, help="Number of trays/nodes in series")
     parser.add_argument("--max-steps", type=int, default=None, help="Optional limit on number of ambient steps to use")
     parser.add_argument(
         "--output-dir", type=Path, default=Path("RQ1/data/phase1_runs_recirc"), help="Directory to write results"
@@ -104,12 +107,13 @@ def run_sweep(args: argparse.Namespace) -> Dict[float, Phase1Result]:
             X_eq_db=args.Xeq,
             m_p_dry_kg=args.m_p_dry,
             dt_s=args.dt_s,
+            n_trays=args.n_trays,
         )
 
         kinetics_cfg = KineticsConfig(
             mode=args.kinetics_mode,
             use_simple_K=True,
-            use_knb_table=False,
+            use_knb_table=True,
             phase2_models_root=args.phase2_models_root,
             T_C_ref=args.T_ref,
             RH_lo_pct_ref=args.RH_lo_ref,
@@ -142,6 +146,13 @@ def save_results(results_by_r: Dict[float, Phase1Result], output_dir: Path) -> N
     plot_humidity_and_MR(results_by_r, output_dir / "phase1_RH_MR.png")
     plot_energy_and_water(results_by_r, output_dir / "phase1_energy_water.png")
     summarize_SEC_vs_r(results_by_r, output_dir / "phase1_SEC_vs_r.png")
+
+    if results_by_r:
+        any_df = next(iter(results_by_r.values())).df
+        n_trays = len([col for col in any_df.columns if col.startswith("MR_tray")])
+        if n_trays > 0:
+            plot_MR_trays_per_r(results_by_r, output_dir, n_trays)
+            plot_air_trays_per_r(results_by_r, output_dir, n_trays)
 
 
 def print_summary(results_by_r: Dict[float, Phase1Result]) -> None:

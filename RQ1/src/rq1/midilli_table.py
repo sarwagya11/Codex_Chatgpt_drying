@@ -226,3 +226,64 @@ def X_db_from_MR(MR: Iterable[float] | np.ndarray, X0_db: float, X_eq_db: float)
 
     MR_arr = np.asarray(MR, dtype=float)
     return X_eq_db + MR_arr * (X0_db - X_eq_db)
+
+
+def build_keff_table_from_phase2(
+    models_root: Path,
+    X0_db: float,
+    X_eq_db: float,
+    max_time_s: float = 6 * 3600.0,
+    dt_s: float = 60.0,
+    mr_window: tuple[float, float] = (0.9, 0.5),
+) -> pd.DataFrame:
+    """
+    Build an effective drying coefficient table K_eff(T,RH,v,d) from the Phase-2 Midilli rows.
+
+    For each row in phase2c_for_chamber.csv:
+      - reconstruct MR(t) on a 0..max_time_s grid with step dt_s using evaluate_piecewise_midilli_MR
+      - convert MR(t) to X_db(t) using X0_db, X_eq_db
+      - compute dX/dt using np.gradient
+      - compute K_eff(t) = -(1 / (X_db - X_eq_db)) * dX/dt
+      - restrict to times where MR is between mr_window[0] and mr_window[1] (e.g. 0.9..0.5)
+      - take the mean K_eff over that window as a single representative K_eff for that operating point
+
+    Returns a DataFrame with columns:
+      ["T_C", "RH_mid_pct", "v_ms", "thickness_mm", "K_eff_1_per_s"].
+    """
+
+    phase2c_path = models_root / PHASE2C_FILENAME
+    table = load_midilli_rows(phase2c_path)
+
+    time_s = np.arange(0.0, max_time_s + dt_s, dt_s)
+    rows_out: list[dict] = []
+
+    for row in table.values():
+        MR = evaluate_piecewise_midilli_MR(time_s, row)
+        MR = np.clip(MR, 1e-6, 1.0)
+        X_db = X_eq_db + MR * (X0_db - X_eq_db)
+        dX_dt = np.gradient(X_db, time_s)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            K_eff_t = -dX_dt / (X_db - X_eq_db)
+
+        mask = (MR <= mr_window[0]) & (MR >= mr_window[1])
+        if not np.any(mask):
+            mask = (MR <= 0.99) & (MR >= 0.4)
+
+        K_eff_vals = K_eff_t[mask]
+        K_eff_vals = K_eff_vals[np.isfinite(K_eff_vals) & (K_eff_vals > 0)]
+        if K_eff_vals.size == 0:
+            continue
+
+        K_eff_eff = float(np.mean(K_eff_vals))
+
+        rows_out.append(
+            {
+                "T_C": row.T_C,
+                "RH_mid_pct": row.RH_mid_pct,
+                "v_ms": row.v_ms,
+                "thickness_mm": row.thickness_mm,
+                "K_eff_1_per_s": K_eff_eff,
+            }
+        )
+
+    return pd.DataFrame(rows_out)

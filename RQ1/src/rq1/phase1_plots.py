@@ -92,6 +92,26 @@ def plot_humidity_and_MR(
         ax_rh.plot(times_min, 100.0 * df["RH_out_frac"], label=f"r = {r:.2f}")
         ax_mr.plot(times_min, df["MR"], label=f"r = {r:.2f}")
 
+        if {"X_tray_0", "X_tray_last"}.issubset(df.columns):
+            X0_first = df["X_tray_0"].iloc[0]
+            X0_last = df["X_tray_last"].iloc[0]
+
+            if X0_first != 0:
+                ax_mr.plot(
+                    times_min,
+                    df["X_tray_0"] / X0_first,
+                    linestyle="--",
+                    label=f"Tray 0 (norm), r={r:.2f}",
+                )
+
+            if X0_last != 0:
+                ax_mr.plot(
+                    times_min,
+                    df["X_tray_last"] / X0_last,
+                    linestyle=":",
+                    label=f"Tray last (norm), r={r:.2f}",
+                )
+
     ax_rh.set_title("Outlet relative humidity")
     ax_rh.set_xlabel("Time [min]")
     ax_rh.set_ylabel("Outlet RH [%]")
@@ -196,3 +216,59 @@ def summarize_SEC_vs_r(
     csv_path = out_path.with_suffix(".csv")
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     summary_df.to_csv(csv_path, index=False)
+
+
+def plot_MR_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Path, n_trays: int) -> None:
+    """Plot tray-wise moisture ratios vs time for each recirculation ratio."""
+
+    for r, res in sorted(results_by_r.items()):
+        df = res.df
+        if df.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        t_min = df["time_s"] / 60.0
+
+        for j in range(n_trays):
+            col = f"MR_tray{j}"
+            if col in df.columns:
+                ax.plot(t_min, df[col], label=f"Tray {j}")
+
+        ax.set_xlabel("Time [min]")
+        ax.set_ylabel("Moisture ratio [-]")
+        ax.set_title(f"Tray-wise MR vs time (r = {r:.2f})")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / f"phase1_MR_trays_r{r:.2f}.png", dpi=150)
+        plt.close(fig)
+
+
+def plot_air_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Path, n_trays: int) -> None:
+    """Plot air outlet temperature and RH per tray for each recirculation ratio."""
+
+    for r, res in sorted(results_by_r.items()):
+        df = res.df
+        if df.empty:
+            continue
+
+        t_min = df["time_s"] / 60.0
+        fig, (axT, axRH) = plt.subplots(2, 1, figsize=(6, 6), sharex=True)
+
+        for j in range(n_trays):
+            T_col = f"T_tray{j}_out_C"
+            RH_col = f"RH_tray{j}_out_frac"
+            if T_col in df.columns:
+                axT.plot(t_min, df[T_col], label=f"Tray {j}")
+            if RH_col in df.columns:
+                axRH.plot(t_min, df[RH_col] * 100.0, label=f"Tray {j}")
+
+        axT.set_ylabel("T outlet [°C]")
+        axT.set_title(f"Air outlet per tray (r = {r:.2f})")
+        axT.legend()
+
+        axRH.set_xlabel("Time [min]")
+        axRH.set_ylabel("RH outlet [%]")
+
+        fig.tight_layout()
+        fig.savefig(output_dir / f"phase1_air_trays_r{r:.2f}.png", dpi=150)
+        plt.close(fig)
