@@ -82,7 +82,7 @@ def _nearest_keff_row(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> 
 
     RH_pct = RH_in_frac * 100.0
     dist2 = (table["T_C"] - T_in_C) ** 2 + (table["RH_mid_pct"] - RH_pct) ** 2
-    idx = int(dist2.values.argmin())
+    idx = int(np.argmin(dist2.to_numpy()))
     return table.iloc[idx]
 
 
