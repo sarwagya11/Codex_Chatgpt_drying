@@ -109,7 +109,7 @@ def run_sweep(args: argparse.Namespace) -> Dict[float, Phase1Result]:
         kinetics_cfg = KineticsConfig(
             mode=args.kinetics_mode,
             use_simple_K=True,
-            use_knb_table=False,
+            use_knb_table=True,
             phase2_models_root=args.phase2_models_root,
             T_C_ref=args.T_ref,
             RH_lo_pct_ref=args.RH_lo_ref,

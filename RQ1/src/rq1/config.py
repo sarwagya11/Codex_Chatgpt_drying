@@ -55,6 +55,8 @@ class KineticsConfig:
     RH_max_valid_pct: float = 45.0
     RH_soft_min_pct: float = 20.0
     RH_soft_max_pct: float = 55.0
+    RH_min_valid_frac: float = 0.25
+    RH_max_valid_frac: float = 0.45
 
     Ea_over_R_K: float | None = 3839.0
     max_RH_scale: float = 1.5

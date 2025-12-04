@@ -71,11 +71,11 @@ def main() -> None:
     )
 
     kinetics_cfg = KineticsConfig(
-    mode=args.kinetics_mode,
-    use_simple_K=True,          # again, ignored for phase2_midilli
-    use_knb_table=False,
-    phase2_models_root=args.phase2_models_root,
-)
+        mode=args.kinetics_mode,
+        use_simple_K=True,  # again, ignored for phase2_midilli
+        use_knb_table=True,
+        phase2_models_root=args.phase2_models_root,
+    )
 
 
     sim_cfg = SimulationConfig(

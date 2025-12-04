@@ -60,6 +60,15 @@ def get_keff_table(cfg: KineticsConfig) -> pd.DataFrame:
     return _KEFF_TABLE_DF
 
 
+def _inside_valid_box(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> bool:
+    """Return True if (T, RH) are inside the Phase-2 validity box."""
+
+    return (
+        cfg.T_min_valid_C <= T_in_C <= cfg.T_max_valid_C
+        and cfg.RH_min_valid_frac <= RH_in_frac <= cfg.RH_max_valid_frac
+    )
+
+
 def K_eff_from_T_RH(
     T_in_C: float,
     RH_in_frac: float,
@@ -68,8 +77,9 @@ def K_eff_from_T_RH(
     """
     Return effective first-order drying coefficient K_eff [1/s].
 
-    If cfg.use_knb_table and cfg.phase2_models_root is set, interpolate K_eff
-    from the Phase-2-derived table as a function of (T_C, RH_pct, v_ms, thickness_mm).
+    If cfg.use_knb_table and cfg.phase2_models_root is set, select K_eff from the
+    Phase-2-derived table (nearest neighbour in T/RH) and optionally apply
+    guardrail scaling when outside the calibrated validity box.
 
     Otherwise, fall back to the existing simple exponential law in T and RH.
     """
@@ -80,18 +90,29 @@ def K_eff_from_T_RH(
             warnings.warn("K_eff table is empty; falling back to simple law.")
         else:
             RH_pct = RH_in_frac * 100.0
-            v_ms = cfg.v_ms_ref
-            thickness_mm = cfg.thickness_mm_ref
-
-            features = table[["T_C", "RH_mid_pct", "v_ms", "thickness_mm"]].to_numpy()
-            targets = np.array([T_in_C, RH_pct, v_ms, thickness_mm])
-            diffs = features - targets
-            distances = np.sum(diffs ** 2, axis=1)
-            idx = int(np.argmin(distances))
+            dist2 = (table["T_C"] - T_in_C) ** 2 + (table["RH_mid_pct"] - RH_pct) ** 2
+            idx = int(dist2.values.argmin())
             row = table.iloc[idx]
-            K_eff = float(row["K_eff_1_per_s"])
-            if K_eff > 0:
-                return K_eff
+
+            base_K = float(row["K_eff_1_per_s"])
+            if base_K <= 0.0:
+                base_K = cfg.K_min_1_per_s
+
+            T_base_C = float(row["T_C"])
+            RH_base_frac = float(row["RH_mid_pct"]) / 100.0
+
+            if _inside_valid_box(T_in_C, RH_in_frac, cfg):
+                return max(cfg.K_min_1_per_s, base_K)
+
+            K_guard, _flags = get_K_eff_from_state(
+                base_K_1_per_s=base_K,
+                T_in_C=T_in_C,
+                RH_in_frac=RH_in_frac,
+                cfg=cfg,
+                T_base_C=T_base_C,
+                RH_base_frac=RH_base_frac,
+            )
+            return max(cfg.K_min_1_per_s, K_guard)
 
     K_ref = cfg.K_ref_1_per_s
     dT = T_in_C - cfg.T_ref_C
@@ -102,12 +123,12 @@ def K_eff_from_T_RH(
 
 
 def get_K_eff_from_state(
+    base_K_1_per_s: float,
     T_in_C: float,
     RH_in_frac: float,
     cfg: KineticsConfig,
-    K_base: float,
-    RH_base_frac: float,
-    T_base_C: float,
+    T_base_C: float | None = None,
+    RH_base_frac: float | None = None,
 ) -> tuple[float, dict]:
     """
     Adjust a base kinetic coefficient using temperature/RH guardrails.
@@ -116,13 +137,18 @@ def get_K_eff_from_state(
     the strict and soft validity boxes.
     """
 
+    if T_base_C is None:
+        T_base_C = cfg.T_C_ref
+    if RH_base_frac is None:
+        RH_base_frac = 0.5 * (cfg.RH_lo_pct_ref + cfg.RH_hi_pct_ref) / 100.0
+
     T_min = cfg.T_min_valid_C
     T_max = cfg.T_max_valid_C
     T_soft_min = cfg.T_soft_min_C
     T_soft_max = cfg.T_soft_max_C
 
-    RH_min = cfg.RH_min_valid_pct / 100.0
-    RH_max = cfg.RH_max_valid_pct / 100.0
+    RH_min = getattr(cfg, "RH_min_valid_frac", cfg.RH_min_valid_pct / 100.0)
+    RH_max = getattr(cfg, "RH_max_valid_frac", cfg.RH_max_valid_pct / 100.0)
     RH_soft_min = cfg.RH_soft_min_pct / 100.0
     RH_soft_max = cfg.RH_soft_max_pct / 100.0
 
@@ -131,7 +157,7 @@ def get_K_eff_from_state(
     inside_T_soft = T_soft_min <= T_in_C <= T_soft_max
     inside_RH_soft = RH_soft_min <= RH_in_frac <= RH_soft_max
 
-    K_eff = K_base
+    K_eff = base_K_1_per_s
 
     T_in_K = T_in_C + 273.15
     T_base_K = T_base_C + 273.15
@@ -140,6 +166,7 @@ def get_K_eff_from_state(
         K_eff *= math.exp(-Ea_over_R * (1.0 / T_in_K - 1.0 / T_base_K))
 
     RH_eff = min(max(RH_in_frac, RH_soft_min), RH_soft_max)
+    RH_eff = min(max(RH_eff, RH_min), RH_max)
     denom = 1.0 - RH_base_frac
     if denom > 1e-6:
         scale_RH = (1.0 - RH_eff) / denom
@@ -236,10 +263,10 @@ def compute_dm_w_kinetic_first_order(
             RH_base_frac = 0.5 * (cfg.RH_lo_pct_ref + cfg.RH_hi_pct_ref) / 100.0
             T_base_C = cfg.T_C_ref
             K_eff_override, flags = get_K_eff_from_state(
+                base_K_1_per_s=k_midilli,
                 T_in_C=T_in_C,
                 RH_in_frac=RH_in_frac,
                 cfg=cfg,
-                K_base=k_midilli,
                 RH_base_frac=RH_base_frac,
                 T_base_C=T_base_C,
             )
