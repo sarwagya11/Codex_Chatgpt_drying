@@ -101,6 +101,62 @@ def K_eff_from_T_RH(
     return K_eff
 
 
+def get_K_eff_from_state(
+    T_in_C: float,
+    RH_in_frac: float,
+    cfg: KineticsConfig,
+    K_base: float,
+    RH_base_frac: float,
+    T_base_C: float,
+) -> tuple[float, dict]:
+    """
+    Adjust a base kinetic coefficient using temperature/RH guardrails.
+
+    Returns (K_eff, flags_dict) capturing whether the operating point is inside
+    the strict and soft validity boxes.
+    """
+
+    T_min = cfg.T_min_valid_C
+    T_max = cfg.T_max_valid_C
+    T_soft_min = cfg.T_soft_min_C
+    T_soft_max = cfg.T_soft_max_C
+
+    RH_min = cfg.RH_min_valid_pct / 100.0
+    RH_max = cfg.RH_max_valid_pct / 100.0
+    RH_soft_min = cfg.RH_soft_min_pct / 100.0
+    RH_soft_max = cfg.RH_soft_max_pct / 100.0
+
+    inside_T_box = T_min <= T_in_C <= T_max
+    inside_RH_box = RH_min <= RH_in_frac <= RH_max
+    inside_T_soft = T_soft_min <= T_in_C <= T_soft_max
+    inside_RH_soft = RH_soft_min <= RH_in_frac <= RH_soft_max
+
+    K_eff = K_base
+
+    T_in_K = T_in_C + 273.15
+    T_base_K = T_base_C + 273.15
+    Ea_over_R = cfg.Ea_over_R_K
+    if Ea_over_R is not None and inside_T_soft:
+        K_eff *= math.exp(-Ea_over_R * (1.0 / T_in_K - 1.0 / T_base_K))
+
+    RH_eff = min(max(RH_in_frac, RH_soft_min), RH_soft_max)
+    denom = 1.0 - RH_base_frac
+    if denom > 1e-6:
+        scale_RH = (1.0 - RH_eff) / denom
+        scale_RH = min(scale_RH, cfg.max_RH_scale)
+        scale_RH = max(scale_RH, 0.0)
+        K_eff *= scale_RH
+
+    flags = {
+        "inside_T_box": inside_T_box,
+        "inside_RH_box": inside_RH_box,
+        "inside_T_soft": inside_T_soft,
+        "inside_RH_soft": inside_RH_soft,
+    }
+
+    return K_eff, flags
+
+
 def get_knb_table(cfg: KineticsConfig) -> Optional[KNBTable]:
     """Load and cache KNBTable if configured."""
 
@@ -177,8 +233,17 @@ def compute_dm_w_kinetic_first_order(
         midilli_params = get_midilli_params_for_state(T_in_C, RH_in_frac, cfg)
         if midilli_params is not None:
             k_midilli, _, _ = midilli_params
-            # Placeholder: Midilli integration will refine this mapping later.
-            K_eff_override = max(cfg.K_ref_1_per_s, k_midilli)
+            RH_base_frac = 0.5 * (cfg.RH_lo_pct_ref + cfg.RH_hi_pct_ref) / 100.0
+            T_base_C = cfg.T_C_ref
+            K_eff_override, flags = get_K_eff_from_state(
+                T_in_C=T_in_C,
+                RH_in_frac=RH_in_frac,
+                cfg=cfg,
+                K_base=k_midilli,
+                RH_base_frac=RH_base_frac,
+                T_base_C=T_base_C,
+            )
+            # TODO: expose flags in simulation outputs for diagnostics
         else:
             warnings.warn(
                 "Midilli model selected but no KNB table available; falling back to simple kinetics.",
