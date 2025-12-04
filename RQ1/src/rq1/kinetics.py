@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 from .config import KineticsConfig
 from .knb_table import KNBTable
@@ -16,12 +17,19 @@ from .midilli_table import (
     evaluate_piecewise_midilli_MR,
     load_midilli_surfaces,
     predict_midilli_params_for_operating_point,
+    build_keff_table_from_phase2,
 )
 
-from .psychro import humidity_ratio_from_T_RH
+from .psychro import (
+    RH_from_T_omega,
+    humidity_ratio_from_T_RH,
+    moist_air_enthalpy_kJ_per_kg,
+    temperature_from_h_omega_C,
+)
 
 # Cache for Midilli parameter tables
 _knb_cache: Dict[Path, KNBTable] = {}
+_KEFF_TABLE_DF: Optional[pd.DataFrame] = None
 
 
 @dataclass
@@ -30,23 +38,150 @@ class MidilliCurve:
     MR: np.ndarray
 
 
-def K_eff_from_T_RH(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> float:
+def get_keff_table(cfg: KineticsConfig) -> pd.DataFrame:
     """
-    Effective drying rate coefficient K [1/s] as a function of inlet air temperature and RH.
+    Return a cached K_eff table derived from Phase-2 Midilli parameters.
 
-    Base model (temperature dependence):
-        K_T = K_ref * exp(alpha_T * (T_in_C - T_ref))
-
-    Humidity factor (slows drying as RH increases):
-        f_RH = exp(-alpha_RH * RH_in_frac)
-
-    so:
-        K_eff = K_T * f_RH
+    Uses cfg.phase2_models_root as the root containing phase2c_for_chamber.csv.
     """
-    delta_T = T_in_C - cfg.T_ref_C
-    K_T = cfg.K_ref_1_per_s * math.exp(cfg.alpha_T_per_C * delta_T)
+
+    global _KEFF_TABLE_DF
+    if _KEFF_TABLE_DF is not None:
+        return _KEFF_TABLE_DF
+
+    if cfg.phase2_models_root is None:
+        raise ValueError("phase2_models_root must be set in KineticsConfig to build K_eff table.")
+
+    _KEFF_TABLE_DF = build_keff_table_from_phase2(
+        models_root=cfg.phase2_models_root,
+        X0_db=cfg.X0_db_ref,
+        X_eq_db=cfg.X_eq_db_ref,
+    )
+    return _KEFF_TABLE_DF
+
+
+def _inside_valid_box(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> bool:
+    """Return True if (T, RH) are inside the Phase-2 validity box."""
+
+    return (
+        cfg.T_min_valid_C <= T_in_C <= cfg.T_max_valid_C
+        and cfg.RH_min_valid_frac <= RH_in_frac <= cfg.RH_max_valid_frac
+    )
+
+
+def K_eff_from_T_RH(
+    T_in_C: float,
+    RH_in_frac: float,
+    cfg: KineticsConfig,
+) -> float:
+    """
+    Return effective first-order drying coefficient K_eff [1/s].
+
+    If cfg.use_knb_table and cfg.phase2_models_root is set, select K_eff from the
+    Phase-2-derived table (nearest neighbour in T/RH) and optionally apply
+    guardrail scaling when outside the calibrated validity box.
+
+    Otherwise, fall back to the existing simple exponential law in T and RH.
+    """
+
+    if cfg.use_knb_table and cfg.phase2_models_root is not None:
+        table = get_keff_table(cfg)
+        if table.empty:
+            warnings.warn("K_eff table is empty; falling back to simple law.")
+        else:
+            RH_pct = RH_in_frac * 100.0
+            dist2 = (table["T_C"] - T_in_C) ** 2 + (table["RH_mid_pct"] - RH_pct) ** 2
+            idx = int(dist2.values.argmin())
+            row = table.iloc[idx]
+
+            base_K = float(row["K_eff_1_per_s"])
+            if base_K <= 0.0:
+                base_K = cfg.K_min_1_per_s
+
+            T_base_C = float(row["T_C"])
+            RH_base_frac = float(row["RH_mid_pct"]) / 100.0
+
+            if _inside_valid_box(T_in_C, RH_in_frac, cfg):
+                return max(cfg.K_min_1_per_s, base_K)
+
+            K_guard, _flags = get_K_eff_from_state(
+                base_K_1_per_s=base_K,
+                T_in_C=T_in_C,
+                RH_in_frac=RH_in_frac,
+                cfg=cfg,
+                T_base_C=T_base_C,
+                RH_base_frac=RH_base_frac,
+            )
+            return max(cfg.K_min_1_per_s, K_guard)
+
+    K_ref = cfg.K_ref_1_per_s
+    dT = T_in_C - cfg.T_ref_C
+    K_T = K_ref * math.exp(cfg.alpha_T_per_C * dT)
     f_RH = math.exp(-cfg.alpha_RH * RH_in_frac)
-    return K_T * f_RH
+    K_eff = max(cfg.K_min_1_per_s, K_T * f_RH)
+    return K_eff
+
+
+def get_K_eff_from_state(
+    base_K_1_per_s: float,
+    T_in_C: float,
+    RH_in_frac: float,
+    cfg: KineticsConfig,
+    T_base_C: float | None = None,
+    RH_base_frac: float | None = None,
+) -> tuple[float, dict]:
+    """
+    Adjust a base kinetic coefficient using temperature/RH guardrails.
+
+    Returns (K_eff, flags_dict) capturing whether the operating point is inside
+    the strict and soft validity boxes.
+    """
+
+    if T_base_C is None:
+        T_base_C = cfg.T_C_ref
+    if RH_base_frac is None:
+        RH_base_frac = 0.5 * (cfg.RH_lo_pct_ref + cfg.RH_hi_pct_ref) / 100.0
+
+    T_min = cfg.T_min_valid_C
+    T_max = cfg.T_max_valid_C
+    T_soft_min = cfg.T_soft_min_C
+    T_soft_max = cfg.T_soft_max_C
+
+    RH_min = getattr(cfg, "RH_min_valid_frac", cfg.RH_min_valid_pct / 100.0)
+    RH_max = getattr(cfg, "RH_max_valid_frac", cfg.RH_max_valid_pct / 100.0)
+    RH_soft_min = cfg.RH_soft_min_pct / 100.0
+    RH_soft_max = cfg.RH_soft_max_pct / 100.0
+
+    inside_T_box = T_min <= T_in_C <= T_max
+    inside_RH_box = RH_min <= RH_in_frac <= RH_max
+    inside_T_soft = T_soft_min <= T_in_C <= T_soft_max
+    inside_RH_soft = RH_soft_min <= RH_in_frac <= RH_soft_max
+
+    K_eff = base_K_1_per_s
+
+    T_in_K = T_in_C + 273.15
+    T_base_K = T_base_C + 273.15
+    Ea_over_R = cfg.Ea_over_R_K
+    if Ea_over_R is not None and inside_T_soft:
+        K_eff *= math.exp(-Ea_over_R * (1.0 / T_in_K - 1.0 / T_base_K))
+
+    RH_eff = min(max(RH_in_frac, RH_soft_min), RH_soft_max)
+    RH_eff = min(max(RH_eff, RH_min), RH_max)
+    denom = 1.0 - RH_base_frac
+    if denom > 1e-6:
+        scale_RH = (1.0 - RH_eff) / denom
+        scale_RH = min(scale_RH, cfg.max_RH_scale)
+        scale_RH = max(scale_RH, 0.0)
+        K_eff *= scale_RH
+
+    flags = {
+        "inside_T_box": inside_T_box,
+        "inside_RH_box": inside_RH_box,
+        "inside_T_soft": inside_T_soft,
+        "inside_RH_soft": inside_RH_soft,
+    }
+
+    return K_eff, flags
 
 
 def get_knb_table(cfg: KineticsConfig) -> Optional[KNBTable]:
@@ -125,8 +260,17 @@ def compute_dm_w_kinetic_first_order(
         midilli_params = get_midilli_params_for_state(T_in_C, RH_in_frac, cfg)
         if midilli_params is not None:
             k_midilli, _, _ = midilli_params
-            # Placeholder: Midilli integration will refine this mapping later.
-            K_eff_override = max(cfg.K_ref_1_per_s, k_midilli)
+            RH_base_frac = 0.5 * (cfg.RH_lo_pct_ref + cfg.RH_hi_pct_ref) / 100.0
+            T_base_C = cfg.T_C_ref
+            K_eff_override, flags = get_K_eff_from_state(
+                base_K_1_per_s=k_midilli,
+                T_in_C=T_in_C,
+                RH_in_frac=RH_in_frac,
+                cfg=cfg,
+                RH_base_frac=RH_base_frac,
+                T_base_C=T_base_C,
+            )
+            # TODO: expose flags in simulation outputs for diagnostics
         else:
             warnings.warn(
                 "Midilli model selected but no KNB table available; falling back to simple kinetics.",
@@ -212,12 +356,45 @@ def compute_dm_w_air_capacity(
     cfg: KineticsConfig,
 ) -> float:
     """
-    Compute maximum water mass [kg] that the air can take in this step based on inlet conditions.
+    Compute maximum water mass [kg] that the air can take in this step such that
+    the outlet RH (after adiabatic cooling) does not exceed cfg.RH_out_max_frac.
     """
 
-    omega_sat = humidity_ratio_from_T_RH(T_in_C, RH_frac=1.0)
-    omega_out_max = min(omega_sat * cfg.RH_out_max_frac, omega_sat)
-    domega_max = max(omega_out_max - omega_in, cfg.min_domega_drive)
+    if m_da_kg_per_s <= 0.0 or dt_s <= 0.0:
+        return 0.0
+
+    h_in = moist_air_enthalpy_kJ_per_kg(T_in_C, omega_in)
+
+    RH_max = cfg.RH_out_max_frac
+    if RH_max <= 0.0 or RH_max >= 1.0:
+        return float("inf")
+
+    omega_sat_in = humidity_ratio_from_T_RH(T_in_C, 1.0)
+    domega_hi = max(omega_sat_in - omega_in, cfg.min_domega_drive)
+    if domega_hi <= 0:
+        return 0.0
+
+    def RH_out_for_domega(domega: float) -> float:
+        omega_out = omega_in + domega
+        if omega_out <= 0.0:
+            return 0.0
+        T_out_C = temperature_from_h_omega_C(h_in, omega_out)
+        return RH_from_T_omega(T_out_C, omega_out)
+
+    RH_hi = RH_out_for_domega(domega_hi)
+    if RH_hi <= RH_max:
+        m_w_rate_air_max = m_da_kg_per_s * domega_hi
+        return max(0.0, m_w_rate_air_max * dt_s)
+
+    lo, hi = 0.0, domega_hi
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        RH_mid = RH_out_for_domega(mid)
+        if RH_mid > RH_max:
+            hi = mid
+        else:
+            lo = mid
+    domega_max = max(lo, cfg.min_domega_drive)
     m_w_rate_air_max = m_da_kg_per_s * domega_max
     dm_w_air_max = max(0.0, m_w_rate_air_max * dt_s)
     return dm_w_air_max
