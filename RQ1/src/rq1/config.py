@@ -30,7 +30,7 @@ class KineticsConfig:
     mode: Literal["phase2_midilli", "first_order"] = "phase2_midilli"
     model_type: Literal["first_order", "midilli"] = "first_order"
     use_simple_K: bool = True
-    use_knb_table: bool = False
+    use_knb_table: bool = True
     knb_csv_path: Optional[Path] = None
 
     # Existing first-order parameters
