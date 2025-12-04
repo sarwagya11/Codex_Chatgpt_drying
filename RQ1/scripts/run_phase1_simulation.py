@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--Xeq", type=float, required=True, help="Equilibrium moisture content (dry basis)")
     parser.add_argument("--m_p_dry", type=float, required=True, help="Dry mass of product [kg]")
     parser.add_argument("--dt_s", type=float, required=True, help="Time step [s]")
+    parser.add_argument("--n-trays", type=int, default=1, help="Number of trays/nodes in series")
     parser.add_argument(
         "--max-steps", type=int, default=None, help="Optional limit on number of ambient steps to use"
     )
@@ -68,14 +69,15 @@ def main() -> None:
         X_eq_db=args.Xeq,
         m_p_dry_kg=args.m_p_dry,
         dt_s=args.dt_s,
+        n_trays=args.n_trays,
     )
 
     kinetics_cfg = KineticsConfig(
-    mode=args.kinetics_mode,
-    use_simple_K=True,          # again, ignored for phase2_midilli
-    use_knb_table=False,
-    phase2_models_root=args.phase2_models_root,
-)
+        mode=args.kinetics_mode,
+        use_simple_K=True,  # again, ignored for phase2_midilli
+        use_knb_table=True,
+        phase2_models_root=args.phase2_models_root,
+    )
 
 
     sim_cfg = SimulationConfig(
