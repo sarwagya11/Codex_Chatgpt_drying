@@ -152,7 +152,16 @@ def plot_energy_and_water(
             continue
         times_min = df["time_s"] / 60.0
         ax_energy.plot(times_min, df["Q_heater_cum_kJ"], label=f"r = {r:.2f}")
-        ax_water.plot(times_min, df["m_w_cum_kg"], label=f"r = {r:.2f}")
+
+        tray_dm_cols = sorted(col for col in df.columns if col.startswith("dm_w_tray"))
+        if tray_dm_cols:
+            tray_totals = [df[col].sum() for col in tray_dm_cols]
+            tray_summary = ", ".join(f"{i}: {total:.3f} kg" for i, total in enumerate(tray_totals))
+            label_water = f"r = {r:.2f} (tray dm: {tray_summary})"
+        else:
+            label_water = f"r = {r:.2f}"
+
+        ax_water.plot(times_min, df["m_w_cum_kg"], label=label_water)
 
     ax_energy.set_title("Cumulative heater energy")
     ax_energy.set_xlabel("Time [min]")

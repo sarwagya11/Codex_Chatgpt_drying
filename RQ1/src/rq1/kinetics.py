@@ -62,10 +62,10 @@ def get_keff_table(cfg: KineticsConfig) -> pd.DataFrame:
 def _inside_valid_box(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> bool:
     """Return True if (T, RH) are inside the Phase-2 validity box."""
 
-    T_min = getattr(cfg, "keff_valid_T_min_C", cfg.T_min_valid_C)
-    T_max = getattr(cfg, "keff_valid_T_max_C", cfg.T_max_valid_C)
-    RH_min = getattr(cfg, "keff_valid_RH_min_frac", cfg.RH_min_valid_frac)
-    RH_max = getattr(cfg, "keff_valid_RH_max_frac", cfg.RH_max_valid_frac)
+    T_min = cfg.T_min_valid_C
+    T_max = cfg.T_max_valid_C
+    RH_min = getattr(cfg, "RH_min_valid_frac", cfg.RH_min_valid_frac)
+    RH_max = getattr(cfg, "RH_max_valid_frac", cfg.RH_max_valid_frac)
 
     return T_min <= T_in_C <= T_max and RH_min <= RH_in_frac <= RH_max
 
@@ -257,6 +257,7 @@ def compute_dm_w_kinetic_first_order(
     dt_s: float,
     cfg: KineticsConfig,
     m_p_dry_kg: float,
+    time_s: float | None = None,
 ) -> float:
     """
     Compute kinetic water removal (kg) over dt_s using the first-order model.
@@ -268,18 +269,24 @@ def compute_dm_w_kinetic_first_order(
     RH_in_frac = max(0.0, min(1.0, RH_in_frac))
     k_eff = keff_from_state(T_in_C=T_in_C, RH_in_frac=RH_in_frac, cfg=cfg)
 
-    X_db_new = update_X_db_first_order(
-        X_db=X_db,
-        X_eq_db=X_eq_db,
-        T_in_C=T_in_C,
-        RH_in_frac=RH_in_frac,
-        dt_s=dt_s,
-        cfg=cfg,
-        K_eff_override=k_eff,
-    )
+    X_db_new = X_db - k_eff * (X_db - X_eq_db) * dt_s
+    X_db_new = max(X_db_new, X_eq_db)
 
     dX = max(0.0, X_db - X_db_new)
     dm_w_kin = max(0.0, m_p_dry_kg * dX)
+
+    if cfg.debug_keff:
+        counter = getattr(compute_dm_w_kinetic_first_order, "_debug_counter", 0) + 1
+        compute_dm_w_kinetic_first_order._debug_counter = counter
+        inside_T_box = cfg.T_min_valid_C <= T_in_C <= cfg.T_max_valid_C
+        inside_RH_box = cfg.RH_min_valid_frac <= RH_in_frac <= cfg.RH_max_valid_frac
+        should_log = counter % 60 == 0 or (time_s is not None and time_s % 3600 == 0)
+        if should_log:
+            print(
+                f"[keff debug] t={time_s}, T={T_in_C:.2f}C, RH={RH_in_frac:.3f}, "
+                f"K_eff={k_eff:.4e}, inside_T_box={inside_T_box}, inside_RH_box={inside_RH_box}"
+            )
+
     return dm_w_kin
 
 

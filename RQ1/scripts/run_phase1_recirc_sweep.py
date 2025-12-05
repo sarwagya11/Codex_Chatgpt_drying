@@ -12,6 +12,7 @@ python RQ1/scripts/run_phase1_recirc_sweep.py ^
     --m_p_dry 20 ^
     --dt_s 60 ^
     --max-steps 480 ^
+    --n-trays 4 ^
     --output-dir RQ1/data/phase1_runs_recirc/ktm_summer
 """
 
@@ -133,7 +134,7 @@ def run_sweep(args: argparse.Namespace) -> Dict[float, Phase1Result]:
     return results_by_r
 
 
-def save_results(results_by_r: Dict[float, Phase1Result], output_dir: Path) -> None:
+def save_results(results_by_r: Dict[float, Phase1Result], output_dir: Path, n_trays: int) -> None:
     """Persist per-r simulation data and plots."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -149,8 +150,8 @@ def save_results(results_by_r: Dict[float, Phase1Result], output_dir: Path) -> N
 
     if results_by_r:
         any_df = next(iter(results_by_r.values())).df
-        n_trays = len([col for col in any_df.columns if col.startswith("MR_tray")])
-        if n_trays > 0:
+        has_tray_cols = any(col.startswith("MR_tray") for col in any_df.columns)
+        if has_tray_cols and n_trays > 0:
             plot_MR_trays_per_r(results_by_r, output_dir, n_trays)
             plot_air_trays_per_r(results_by_r, output_dir, n_trays)
 
@@ -170,7 +171,7 @@ def print_summary(results_by_r: Dict[float, Phase1Result]) -> None:
 def main() -> None:
     args = parse_args()
     results_by_r = run_sweep(args)
-    save_results(results_by_r, args.output_dir)
+    save_results(results_by_r, args.output_dir, args.n_trays)
     print_summary(results_by_r)
 
 
