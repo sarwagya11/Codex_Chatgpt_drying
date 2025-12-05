@@ -30,6 +30,7 @@ class DryerConfig:
     air_density_kg_per_m3: float = 1.2  # used only for residence-time estimates
 
     enable_tray_diagnostics: bool = True  # controls writing extra per-tray columns
+    debug_checks: bool = False  # run lightweight monotonicity and RH checks
 
 
 @dataclass
@@ -90,6 +91,9 @@ class KineticsConfig:
     RH_lo_pct_ref: float = 30.0
     RH_hi_pct_ref: float = 40.0
     t_split_min_ref: float = 60.0
+
+    # Debugging
+    debug_keff: bool = False
 
 
 @dataclass

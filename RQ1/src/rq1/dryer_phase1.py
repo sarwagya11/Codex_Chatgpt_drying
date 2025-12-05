@@ -43,10 +43,6 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
     records: List[dict] = []
 
-    total_time_s = (
-        cfg.ambient.max_steps * cfg.dryer.dt_s if cfg.ambient.max_steps is not None else len(amb_df) * cfg.dryer.dt_s
-    )
-
     # Initialize recirculation state from first ambient point
     T_amb0 = float(amb_df.iloc[0]["T_amb_C"])
     RH_amb0 = float(amb_df.iloc[0]["RH_amb_pct"]) / 100.0
@@ -85,9 +81,23 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             m_air_in_tray = rho_da * V_tray_m3
             tau_tray_s = m_air_in_tray / m_da
 
+        X_db_mean = sum(X_trays) / n_trays if n_trays > 0 else 0.0
+        dm_w_kin_total_kg = compute_dm_w_kinetic_first_order(
+            X_db=X_db_mean,
+            X_eq_db=X_eq_db,
+            T_in_C=T_in_C,
+            RH_in_frac=RH_in_frac,
+            dt_s=dt_s,
+            cfg=cfg.kinetics,
+            m_p_dry_kg=m_p_dry_total,
+            time_s=time_s,
+        )
+        dm_w_kin_tray_target = dm_w_kin_total_kg / n_trays if n_trays > 0 else 0.0
+
         dm_w_list: list[float] = []
         T_tray_out_list: list[float] = []
         RH_tray_out_list: list[float] = []
+        MR_trays: list[float] = []
 
         air_T = T_in_C
         air_omega = omega_in
@@ -96,17 +106,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         X_trays_before = list(X_trays)
 
         for i in range(n_trays):
+            dm_w_tray_target = dm_w_kin_tray_target
             RH_in_tray = float(RH_from_T_omega(air_T, air_omega))
-
-            dm_w_kin_kg = compute_dm_w_kinetic_first_order(
-                X_db=X_trays[i],
-                X_eq_db=X_eq_db,
-                T_in_C=air_T,
-                RH_in_frac=RH_in_tray,
-                dt_s=dt_s,
-                cfg=cfg.kinetics,
-                m_p_dry_kg=m_p_tray,
-            )
 
             if cfg.kinetics.enable_air_limit:
                 dm_w_air_max_kg = compute_dm_w_air_capacity(
@@ -119,22 +120,26 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             else:
                 dm_w_air_max_kg = float("inf")
 
-            dm_w_kg = min(dm_w_kin_kg, dm_w_air_max_kg)
+            dm_w_kg = min(dm_w_tray_target, dm_w_air_max_kg)
 
             if m_p_tray > 0.0:
-                X_new = X_trays[i] - dm_w_kg / m_p_tray
+                dX_tray = dm_w_kg / m_p_tray
             else:
-                X_new = X_trays[i]
-
-            if X_new < X_eq_db:
-                X_new = X_eq_db
-                dm_w_kg = max(0.0, (X_trays[i] - X_eq_db) * m_p_tray)
+                dX_tray = 0.0
+            X_new = X_trays[i] - dX_tray
+            X_new = max(X_new, X_eq_db)
+            dm_w_actual = max(0.0, (X_trays[i] - X_new) * m_p_tray)
 
             X_trays[i] = X_new
-            dm_w_list.append(dm_w_kg)
+            dm_w_list.append(dm_w_actual)
 
-            m_w_rate_kg_per_s = dm_w_kg / dt_s
-            omega_out = float(air_omega + m_w_rate_kg_per_s / m_da)
+            MR_tray = (
+                (X_new - X_eq_db) / (cfg.dryer.X0_db - X_eq_db) if cfg.dryer.X0_db != X_eq_db else 0.0
+            )
+            MR_trays.append(MR_tray)
+
+            m_w_rate_kg_per_s = dm_w_actual / dt_s if dt_s > 0 else 0.0
+            omega_out = float(air_omega + m_w_rate_kg_per_s / m_da) if m_da > 0 else air_omega
             h_out = air_h
             T_out_C = float(temperature_from_h_omega_C(h_out, omega_out))
             RH_out_frac = float(RH_from_T_omega(T_out_C, omega_out))
@@ -162,23 +167,9 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         Q_heater_cum_kJ += Q_heater_step_kJ
 
         X_avg = sum(X_trays) / n_trays if n_trays > 0 else 0.0
-        MR_trays = [
-            (X_trays[i] - X_eq_db) / (cfg.dryer.X0_db - X_eq_db) if cfg.dryer.X0_db != X_eq_db else 0.0
-            for i in range(n_trays)
-        ]
         MR_global = sum(MR_trays) / n_trays if n_trays > 0 else 0.0
 
-        m_p_dry = m_p_dry_total
-        m_tray_dry = m_p_dry / n_trays if n_trays > 0 else 0.0
-
-        dm_w_trays_kg: list[float] = []
-        for i in range(n_trays):
-            dX_tray = X_trays_before[i] - X_trays[i]
-            dm_tray = dX_tray * m_tray_dry
-            dm_w_trays_kg.append(dm_tray)
-
-        dm_sum = sum(dm_w_trays_kg)
-        dm_mismatch = dm_sum - m_w_step
+        dm_mismatch = m_w_step - dm_w_kin_total_kg
 
         record = {
             "time_s": time_s,
@@ -218,7 +209,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
                 record[f"RH_tray{i}_out_frac"] = RH_tray_out_list[i]
 
         if cfg.dryer.enable_tray_diagnostics:
-            for i, dm_tray in enumerate(dm_w_trays_kg):
+            for i, dm_tray in enumerate(dm_w_list):
                 record[f"dm_w_tray{i}_kg"] = dm_tray
                 record[f"X_tray_{i}"] = X_trays[i]
 
@@ -229,10 +220,33 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         omega_e_prev = omega_out_last
         h_e_prev = h_out_last
 
-        if all(x <= X_eq_db + 1e-6 for x in X_trays):
+        if X_avg <= X_eq_db + 1e-6:
             break
 
     result_df = pd.DataFrame.from_records(records)
+
+    if cfg.dryer.debug_checks and not result_df.empty:
+        dMR_max = result_df["MR"].diff().dropna().max()
+        if dMR_max > 1e-5:
+            print(f"Warning: MR increased over time (max dMR = {dMR_max:.3e})")
+
+        for i in range(n_trays):
+            mr_col = f"MR_tray{i}"
+            if mr_col in result_df.columns:
+                dMR_tray_max = result_df[mr_col].diff().dropna().max()
+                if dMR_tray_max > 1e-5:
+                    print(f"Warning: MR_tray{i} increased over time (max dMR = {dMR_tray_max:.3e})")
+
+            rh_col = f"RH_tray{i}_out_frac"
+            if rh_col in result_df.columns:
+                max_rh = result_df[rh_col].max()
+                if max_rh > 1.0001:
+                    print(f"Warning: RH_tray{i}_out_frac exceeded saturation (max = {max_rh:.3f})")
+
+        if "RH_out_frac" in result_df.columns:
+            max_rh_out = result_df["RH_out_frac"].max()
+            if max_rh_out > 1.0001:
+                print(f"Warning: RH_out_frac exceeded saturation (max = {max_rh_out:.3f})")
 
     if not result_df.empty:
         Q_total_kWh = result_df["Q_heater_step_kJ"].sum() / 3600.0
