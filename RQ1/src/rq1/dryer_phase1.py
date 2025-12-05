@@ -103,6 +103,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         air_omega = omega_in
         air_h = h_in
 
+        X_trays_before = list(X_trays)
+
         for i in range(n_trays):
             dm_w_tray_target = dm_w_kin_tray_target
             RH_in_tray = float(RH_from_T_omega(air_T, air_omega))
