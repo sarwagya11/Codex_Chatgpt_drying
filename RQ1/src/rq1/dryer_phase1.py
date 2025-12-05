@@ -78,6 +78,13 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         RH_in_frac = float(RH_from_T_omega(T_in_C, omega_in))
         time_s = float(step_idx) * dt_s
 
+        tau_tray_s = None
+        if cfg.dryer.tray_area_m2 is not None and cfg.dryer.tray_depth_m is not None and m_da > 0:
+            V_tray_m3 = cfg.dryer.tray_area_m2 * cfg.dryer.tray_depth_m
+            rho_da = cfg.dryer.air_density_kg_per_m3
+            m_air_in_tray = rho_da * V_tray_m3
+            tau_tray_s = m_air_in_tray / m_da
+
         dm_w_list: list[float] = []
         T_tray_out_list: list[float] = []
         RH_tray_out_list: list[float] = []
@@ -85,6 +92,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         air_T = T_in_C
         air_omega = omega_in
         air_h = h_in
+
+        X_trays_before = list(X_trays)
 
         for i in range(n_trays):
             RH_in_tray = float(RH_from_T_omega(air_T, air_omega))
@@ -159,6 +168,18 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         ]
         MR_global = sum(MR_trays) / n_trays if n_trays > 0 else 0.0
 
+        m_p_dry = m_p_dry_total
+        m_tray_dry = m_p_dry / n_trays if n_trays > 0 else 0.0
+
+        dm_w_trays_kg: list[float] = []
+        for i in range(n_trays):
+            dX_tray = X_trays_before[i] - X_trays[i]
+            dm_tray = dX_tray * m_tray_dry
+            dm_w_trays_kg.append(dm_tray)
+
+        dm_sum = sum(dm_w_trays_kg)
+        dm_mismatch = dm_sum - m_w_step
+
         record = {
             "time_s": time_s,
             "T_amb_C": T_amb_C,
@@ -185,6 +206,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             "Q_heater_cum_kJ": Q_heater_cum_kJ,
             "X_tray_0": X_trays[0],
             "X_tray_last": X_trays[-1],
+            "dm_w_trays_sum_minus_total_kg": dm_mismatch,
+            "tau_tray_s": tau_tray_s,
         }
 
         for i in range(n_trays):
@@ -193,6 +216,11 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
                 record[f"T_tray{i}_out_C"] = T_tray_out_list[i]
             if i < len(RH_tray_out_list):
                 record[f"RH_tray{i}_out_frac"] = RH_tray_out_list[i]
+
+        if cfg.dryer.enable_tray_diagnostics:
+            for i, dm_tray in enumerate(dm_w_trays_kg):
+                record[f"dm_w_tray{i}_kg"] = dm_tray
+                record[f"X_tray_{i}"] = X_trays[i]
 
         records.append(record)
 

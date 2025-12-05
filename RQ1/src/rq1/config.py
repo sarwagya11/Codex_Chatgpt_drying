@@ -24,6 +24,13 @@ class DryerConfig:
     h_fg_kJ_per_kg: float = 2400.0
     n_trays: int = 1
 
+    # Optional geometry for diagnostics (not yet used for physics)
+    tray_area_m2: float | None = None  # horizontal area per tray
+    tray_depth_m: float | None = None  # flow depth / height of air above product
+    air_density_kg_per_m3: float = 1.2  # used only for residence-time estimates
+
+    enable_tray_diagnostics: bool = True  # controls writing extra per-tray columns
+
 
 @dataclass
 class KineticsConfig:
