@@ -133,6 +133,7 @@ def plot_energy_and_water(
     results_by_r: Dict[float, Phase1Result],
     out_path: Path,
     title: str = "Cumulative heater energy and water removed",
+    n_trays: int | None = None,
 ) -> None:
     """
     Plot cumulative heater energy and cumulative water removed for multiple recirculation ratios.
@@ -153,9 +154,17 @@ def plot_energy_and_water(
         times_min = df["time_s"] / 60.0
         ax_energy.plot(times_min, df["Q_heater_cum_kJ"], label=f"r = {r:.2f}")
 
-        tray_dm_cols = sorted(col for col in df.columns if col.startswith("dm_w_tray"))
-        if tray_dm_cols:
-            tray_totals = [df[col].sum() for col in tray_dm_cols]
+        tray_totals = []
+        if n_trays is None:
+            tray_dm_cols = sorted(col for col in df.columns if col.startswith("dm_w_tray"))
+            for col in tray_dm_cols:
+                tray_totals.append(df[col].sum())
+        else:
+            for j in range(n_trays):
+                col = f"dm_w_tray{j}_kg"
+                tray_totals.append(df[col].sum() if col in df.columns else float("nan"))
+
+        if tray_totals:
             tray_summary = ", ".join(f"{i}: {total:.3f} kg" for i, total in enumerate(tray_totals))
             label_water = f"r = {r:.2f} (tray dm: {tray_summary})"
         else:
