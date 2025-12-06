@@ -109,6 +109,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         dm_w_list: list[float] = []
         T_tray_out_list: list[float] = []
         RH_tray_out_list: list[float] = []
+        MR_trays: list[float] = []
 
         for i in range(n_trays):
             X_j = X_trays[i]
@@ -215,6 +216,11 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             record[f"dm_w_tray{i}_kg"] = dm_w_list[i]
 
         record["X_tray_last"] = X_trays[-1]
+
+        if cfg.dryer.enable_tray_diagnostics:
+            for i, dm_tray in enumerate(dm_w_list):
+                record[f"dm_w_tray{i}_kg"] = dm_tray
+                record[f"X_tray_{i}"] = X_trays[i]
 
         records.append(record)
 
