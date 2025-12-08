@@ -106,10 +106,21 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         h_air_in = h_in
         RH_air_in = RH_in_frac
 
+        # Ensure tray state vectors remain aligned with n_trays in case a config
+        # change slipped through.
+        if len(X_trays) < n_trays:
+            X_trays.extend([X_db_init] * (n_trays - len(X_trays)))
+        elif len(X_trays) > n_trays:
+            X_trays = X_trays[:n_trays]
+
+        if len(MR_trays) < n_trays:
+            MR_trays.extend([1.0] * (n_trays - len(MR_trays)))
+        elif len(MR_trays) > n_trays:
+            MR_trays = MR_trays[:n_trays]
+
         dm_w_list: list[float] = []
         T_tray_out_list: list[float] = []
         RH_tray_out_list: list[float] = []
-        MR_trays: list[float] = []
 
         for i in range(n_trays):
             X_j = X_trays[i]
@@ -223,11 +234,6 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             record[f"dm_w_tray{i}_kg"] = dm_w_list[i]
 
         record["X_tray_last"] = X_trays[-1]
-
-        if cfg.dryer.enable_tray_diagnostics:
-            for i, dm_tray in enumerate(dm_w_list):
-                record[f"dm_w_tray{i}_kg"] = dm_tray
-                record[f"X_tray_{i}"] = X_trays[i]
 
         records.append(record)
 
