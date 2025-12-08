@@ -192,7 +192,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             omega_out_last = omega_in
             h_out_last = h_in
 
-        m_w_step = sum(dm_w_list)
+        dm_w_trays_sum = sum(dm_w_list)
+        m_w_step = dm_w_trays_sum
         m_w_cum += m_w_step
         Q_heater_step_kJ = Qdot_heater_kW * dt_s
         Q_heater_cum_kJ += Q_heater_step_kJ
@@ -202,9 +203,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             (X_avg - X_eq_db) / (cfg.dryer.X0_db - X_eq_db) if cfg.dryer.X0_db != X_eq_db else 0.0
         )
 
-        dm_mismatch = m_w_step - sum(dm_w_list)
-
-        dm_mismatch = m_w_step - dm_w_kin_total_kg
+        dm_mismatch = m_w_step - dm_w_trays_sum
 
         record = {
             "time_s": time_s,
