@@ -30,7 +30,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
     Physics outline:
     * Heater raises mixed air from (T_mix, ω_mix) -> (T_set, ω_mix).
-    * Air passes through n_trays in series; each tray removes dm_w_tray at fixed enthalpy.
+    * Air passes through n_trays in series; each tray removes dm_w_tray with latent cooling.
     * Outlet of tray j is inlet of tray j+1.
     * Total dm_w in a step = sum over trays; global X_db is tray-average.
     """
@@ -89,18 +89,6 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             m_air_in_tray = rho_da * V_tray_m3
             tau_tray_s = m_air_in_tray / m_da
 
-        X_db_mean = sum(X_trays) / n_trays if n_trays > 0 else 0.0
-        dm_w_kin_total_kg = compute_dm_w_kinetic_first_order(
-            X_db=X_db_mean,
-            X_eq_db=X_eq_db,
-            T_in_C=T_in_C,
-            RH_in_frac=RH_in_frac,
-            dt_s=dt_s,
-            cfg=cfg.kinetics,
-            m_p_dry_kg=m_p_dry_total,
-            time_s=time_s,
-        )
-
         T_air_in = T_in_C
         omega_air_in = omega_in
         h_air_in = h_in
@@ -124,33 +112,49 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
         for i in range(n_trays):
             X_j = X_trays[i]
-            dm_w_air_max_kg = compute_dm_w_air_capacity(
-                T_in_C=T_air_in,
-                omega_in=omega_air_in,
-                m_da_kg_per_s=m_da,
+            air_T = T_air_in
+            air_omega = omega_air_in
+            air_h = h_air_in
+            RH_in_tray = float(RH_from_T_omega(air_T, air_omega))
+
+            dm_w_kin_kg = compute_dm_w_kinetic_first_order(
+                X_db=X_j,
+                X_eq_db=X_eq_db,
+                T_in_C=air_T,
+                RH_in_frac=RH_in_tray,
                 dt_s=dt_s,
                 cfg=cfg.kinetics,
-                h_fg_kJ_per_kg=h_fg,
-            ) if cfg.kinetics.enable_air_limit else float("inf")
+                m_p_dry_kg=m_p_tray,
+                time_s=time_s,
+            )
 
-            dm_w_kin_kg = dm_w_kin_total_kg / n_trays if n_trays > 0 else 0.0
+            dm_w_air_max_kg = (
+                compute_dm_w_air_capacity(
+                    T_in_C=air_T,
+                    omega_in=air_omega,
+                    m_da_kg_per_s=m_da,
+                    dt_s=dt_s,
+                    cfg=cfg.kinetics,
+                    h_fg_kJ_per_kg=h_fg,
+                )
+                if cfg.kinetics.enable_air_limit
+                else float("inf")
+            )
+
             max_removable = max(0.0, (X_j - X_eq_db) * m_p_tray)
-            dm_w_tray_kg = max(0.0, min(dm_w_kin_kg, dm_w_air_max_kg, max_removable))
+            dm_w_tray_kg = min(dm_w_kin_kg, dm_w_air_max_kg, max_removable)
 
-            if m_p_tray > 0.0:
-                X_new = X_j - dm_w_tray_kg / m_p_tray
-            else:
-                X_new = X_j
+            dX_tray = dm_w_tray_kg / m_p_tray if m_p_tray > 0.0 else 0.0
+            X_new = max(X_j - dX_tray, X_eq_db)
+            dm_w_actual = max(0.0, (X_j - X_new) * m_p_tray)
 
-            if X_new < X_eq_db:
-                X_new = X_eq_db
             X_trays[i] = X_new
 
             MR_trays[i] = (
                 (X_new - X_eq_db) / (cfg.dryer.X0_db - X_eq_db) if cfg.dryer.X0_db != X_eq_db else 0.0
             )
 
-            m_w_rate_kg_per_s = dm_w_tray_kg / dt_s if dt_s > 0 else 0.0
+            m_w_rate_kg_per_s = dm_w_actual / dt_s if dt_s > 0 else 0.0
             omega_air_out = (
                 float(omega_air_in + m_w_rate_kg_per_s / m_da) if m_da > 0 else omega_air_in
             )
@@ -161,8 +165,6 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             else:
                 h_air_out = h_air_in
             T_air_out = float(temperature_from_h_omega_C(h_air_out, omega_air_out))
-            if T_air_out < -60.0:
-                T_air_out = -60.0
             RH_air_out = float(RH_from_T_omega(T_air_out, omega_air_out))
 
             if RH_air_out > 1.0:
@@ -170,7 +172,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
                 RH_air_out = 1.0
                 h_air_out = float(moist_air_enthalpy_kJ_per_kg(T_air_out, omega_air_out))
 
-            dm_w_list.append(dm_w_tray_kg)
+            dm_w_list.append(dm_w_actual)
             T_tray_out_list.append(T_air_out)
             RH_tray_out_list.append(RH_air_out)
 
@@ -196,7 +198,11 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         Q_heater_cum_kJ += Q_heater_step_kJ
 
         X_avg = sum(X_trays) / n_trays if n_trays > 0 else 0.0
-        MR_global = sum(MR_trays) / n_trays if n_trays > 0 else 0.0
+        MR_global = (
+            (X_avg - X_eq_db) / (cfg.dryer.X0_db - X_eq_db) if cfg.dryer.X0_db != X_eq_db else 0.0
+        )
+
+        dm_mismatch = m_w_step - sum(dm_w_list)
 
         dm_mismatch = m_w_step - dm_w_kin_total_kg
 

@@ -363,12 +363,11 @@ def compute_dm_w_air_capacity(
     if m_da_kg_per_s <= 0.0 or dt_s <= 0.0:
         return 0.0
 
-    h_in = moist_air_enthalpy_kJ_per_kg(T_in_C, omega_in)
-
     RH_max = cfg.RH_out_max_frac
     if RH_max <= 0.0 or RH_max >= 1.0:
         return float("inf")
 
+    h_in = moist_air_enthalpy_kJ_per_kg(T_in_C, omega_in)
     omega_sat_in = humidity_ratio_from_T_RH(T_in_C, 1.0)
     domega_hi = max(omega_sat_in - omega_in, cfg.min_domega_drive)
     if domega_hi <= 0:
@@ -399,7 +398,7 @@ def compute_dm_w_air_capacity(
             hi = mid
         else:
             lo = mid
-    domega_max = max(lo, cfg.min_domega_drive)
+    domega_max = max(lo, 0.0)
     m_w_rate_air_max = m_da_kg_per_s * domega_max
     dm_w_air_max = max(0.0, m_w_rate_air_max * dt_s)
     return dm_w_air_max
