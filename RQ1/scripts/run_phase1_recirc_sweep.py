@@ -145,7 +145,7 @@ def save_results(results_by_r: Dict[float, Phase1Result], output_dir: Path, n_tr
 
     plot_temperatures(results_by_r, output_dir / "phase1_temps.png")
     plot_humidity_and_MR(results_by_r, output_dir / "phase1_RH_MR.png")
-    plot_energy_and_water(results_by_r, output_dir / "phase1_energy_water.png")
+    plot_energy_and_water(results_by_r, output_dir / "phase1_energy_water.png", n_trays=n_trays)
     summarize_SEC_vs_r(results_by_r, output_dir / "phase1_SEC_vs_r.png")
 
     if results_by_r:

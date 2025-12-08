@@ -352,10 +352,12 @@ def compute_dm_w_air_capacity(
     m_da_kg_per_s: float,
     dt_s: float,
     cfg: KineticsConfig,
+    h_fg_kJ_per_kg: float,
 ) -> float:
     """
     Compute maximum water mass [kg] that the air can take in this step such that
-    the outlet RH (after adiabatic cooling) does not exceed cfg.RH_out_max_frac.
+    the outlet RH (after latent-heat-adjusted cooling) does not exceed
+    cfg.RH_out_max_frac.
     """
 
     if m_da_kg_per_s <= 0.0 or dt_s <= 0.0:
@@ -376,7 +378,9 @@ def compute_dm_w_air_capacity(
         omega_out = omega_in + domega
         if omega_out <= 0.0:
             return 0.0
-        T_out_C = temperature_from_h_omega_C(h_in, omega_out)
+        m_w_rate_kg_per_s = m_da_kg_per_s * domega
+        h_out = h_in - m_w_rate_kg_per_s * h_fg_kJ_per_kg / m_da_kg_per_s
+        T_out_C = temperature_from_h_omega_C(h_out, omega_out)
         return RH_from_T_omega(T_out_C, omega_out)
 
     RH_hi = RH_out_for_domega(domega_hi)
