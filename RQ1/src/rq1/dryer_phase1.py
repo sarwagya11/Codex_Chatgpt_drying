@@ -204,6 +204,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
         dm_mismatch = m_w_step - sum(dm_w_list)
 
+        dm_mismatch = m_w_step - dm_w_kin_total_kg
+
         record = {
             "time_s": time_s,
             "T_amb_C": T_amb_C,

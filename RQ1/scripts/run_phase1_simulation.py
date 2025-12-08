@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--Xeq", type=float, required=True, help="Equilibrium moisture content (dry basis)")
     parser.add_argument("--m_p_dry", type=float, required=True, help="Dry mass of product [kg]")
     parser.add_argument("--dt_s", type=float, required=True, help="Time step [s]")
-    parser.add_argument("--n-trays", type=int, default=1, help="Number of trays/nodes in series")
+    parser.add_argument("--n-trays", type=int, default=2, help="Number of trays/nodes in series")
     parser.add_argument(
         "--max-steps", type=int, default=None, help="Optional limit on number of ambient steps to use"
     )
