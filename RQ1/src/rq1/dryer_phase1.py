@@ -161,6 +161,8 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             else:
                 h_air_out = h_air_in
             T_air_out = float(temperature_from_h_omega_C(h_air_out, omega_air_out))
+            if T_air_out < -60.0:
+                T_air_out = -60.0
             RH_air_out = float(RH_from_T_omega(T_air_out, omega_air_out))
 
             if RH_air_out > 1.0:

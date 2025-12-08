@@ -381,6 +381,9 @@ def compute_dm_w_air_capacity(
         m_w_rate_kg_per_s = m_da_kg_per_s * domega
         h_out = h_in - m_w_rate_kg_per_s * h_fg_kJ_per_kg / m_da_kg_per_s
         T_out_C = temperature_from_h_omega_C(h_out, omega_out)
+        # Avoid extreme negative temperatures that can overflow Tetens correlation.
+        if T_out_C < -60.0:
+            T_out_C = -60.0
         return RH_from_T_omega(T_out_C, omega_out)
 
     RH_hi = RH_out_for_domega(domega_hi)
