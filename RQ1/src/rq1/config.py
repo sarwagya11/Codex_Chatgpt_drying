@@ -14,13 +14,13 @@ class AmbientConfig:
 
 @dataclass
 class DryerConfig:
-    m_da_kg_per_s: float
     r_recirc: float
     T_set_C: float
     X0_db: float
     X_eq_db: float
     m_p_dry_kg: float
     dt_s: float
+    m_da_kg_per_s: float = 0.0
     h_fg_kJ_per_kg: float = 2400.0
     n_trays: int = 1
 

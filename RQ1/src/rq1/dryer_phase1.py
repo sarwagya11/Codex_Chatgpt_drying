@@ -37,7 +37,6 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
     amb_df = load_ambient_series(cfg.ambient)
     dt_s = cfg.dryer.dt_s
-    m_da = cfg.dryer.m_da_kg_per_s
     r = cfg.dryer.r_recirc
     T_set_C = cfg.dryer.T_set_C
     X_eq_db = cfg.dryer.X_eq_db
@@ -54,6 +53,15 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             print(
                 f"[INFO] Tray area set to {cfg.dryer.tray_area_m2:.3f} m² for {n_trays} trays of {m_p_tray:.2f} kg each."
             )
+
+    m_da = cfg.dryer.m_da_kg_per_s
+    if m_da <= 0.0 and cfg.dryer.tray_area_m2 is not None and cfg.dryer.air_density_kg_per_m3 > 0.0:
+        v_target_ms = 1.1
+        m_da = cfg.dryer.air_density_kg_per_m3 * cfg.dryer.tray_area_m2 * v_target_ms
+        cfg.dryer.m_da_kg_per_s = m_da
+        print(
+            f"[INFO] m_da auto-set to {cfg.dryer.m_da_kg_per_s:.3f} kg/s for v = {v_target_ms} m/s over {cfg.dryer.tray_area_m2:.3f} m²"
+        )
     X_db_init = cfg.dryer.X0_db
     X_trays: list[float] = [X_db_init for _ in range(n_trays)]
     MR_trays: list[float] = [1.0 for _ in range(n_trays)]
