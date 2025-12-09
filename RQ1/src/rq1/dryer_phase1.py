@@ -122,6 +122,10 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         T_tray_out_list: list[float] = []
         RH_tray_out_list: list[float] = []
         h_tray_out_list: list[float] = []
+        q_air_available_list: list[float | None] = []
+        q_needed_latent_list: list[float] = []
+        q_deficit_list: list[float | None] = []
+        air_limit_flag_list: list[bool] = []
 
         for i in range(n_trays):
             X_j = X_trays[i]
@@ -185,10 +189,31 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
                 RH_air_out = min(RH_air_out, 1.0)
                 h_air_out = float(moist_air_enthalpy_kJ_per_kg(T_air_out, omega_air_out))
 
+            if tau_tray_s is not None:
+                delta_h = h_air_in - h_air_out
+                q_air_available_kJ = m_da * delta_h * tau_tray_s
+            else:
+                q_air_available_kJ = None
+
+            h_fg_diag = 2450.0
+            q_needed_latent_kJ = dm_w_actual * h_fg_diag
+            q_deficit_kJ = (
+                q_needed_latent_kJ - q_air_available_kJ
+                if q_air_available_kJ is not None
+                else None
+            )
+            air_energy_insufficient = bool(
+                q_deficit_kJ is not None and q_deficit_kJ > 0
+            )
+
             dm_w_list.append(dm_w_actual)
             T_tray_out_list.append(T_air_out)
             RH_tray_out_list.append(RH_air_out)
             h_tray_out_list.append(h_air_out)
+            q_air_available_list.append(q_air_available_kJ)
+            q_needed_latent_list.append(q_needed_latent_kJ)
+            q_deficit_list.append(q_deficit_kJ)
+            air_limit_flag_list.append(air_energy_insufficient)
 
             T_air_in = T_air_out
             omega_air_in = omega_air_out
@@ -254,6 +279,10 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             record[f"RH_tray{i}_out_frac"] = RH_tray_out_list[i]
             record[f"dm_w_tray{i}_kg"] = dm_w_list[i]
             record[f"h_tray{i}_out_kJ_per_kg"] = h_tray_out_list[i]
+            record[f"q_air_tray{i}_kJ"] = q_air_available_list[i]
+            record[f"q_needed_tray{i}_kJ"] = q_needed_latent_list[i]
+            record[f"q_deficit_tray{i}_kJ"] = q_deficit_list[i]
+            record[f"air_limit_flag_tray{i}"] = air_limit_flag_list[i]
 
         record["X_tray_last"] = X_trays[-1]
         record["m_w_condensed_step_kg"] = m_w_condensed_step
