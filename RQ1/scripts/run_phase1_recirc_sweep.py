@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ambient-csv", type=Path, required=True, help="Path to standardized ambient CSV")
     parser.add_argument("--r-list", type=str, required=True, help="Comma-separated list of recirculation ratios")
     parser.add_argument("--Tset", type=float, required=True, help="Inlet temperature setpoint [°C]")
-    parser.add_argument("--m_da", type=float, required=True, help="Dry air mass flow rate [kg/s]")
+    parser.add_argument("--m_da", type=float, default=0.0, help="Dry air mass flow rate [kg/s]")
     parser.add_argument("--X0", type=float, required=True, help="Initial moisture content (dry basis)")
     parser.add_argument("--Xeq", type=float, required=True, help="Equilibrium moisture content (dry basis)")
     parser.add_argument("--m_p_dry", type=float, required=True, help="Dry mass of product [kg]")
