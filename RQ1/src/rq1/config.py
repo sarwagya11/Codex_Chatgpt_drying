@@ -14,15 +14,27 @@ class AmbientConfig:
 
 @dataclass
 class DryerConfig:
-    m_da_kg_per_s: float
     r_recirc: float
     T_set_C: float
     X0_db: float
     X_eq_db: float
     m_p_dry_kg: float
     dt_s: float
+    m_da_kg_per_s: float = 0.0
     h_fg_kJ_per_kg: float = 2400.0
     n_trays: int = 1
+
+    # Optional geometry for diagnostics (not yet used for physics)
+    tray_area_m2: float | None = None  # horizontal area per tray
+    tray_depth_m: float | None = None  # flow depth / height of air above product
+    air_density_kg_per_m3: float = 1.2  # used only for residence-time estimates
+
+    product_thickness_m: float = 0.006  # Thickness of apple slices (6 mm)
+    product_apparent_density_kg_per_m3: float = 600.0  # Bulk density
+    max_trays: int = 4  # Maximum allowed tray count
+
+    enable_tray_diagnostics: bool = True  # controls writing extra per-tray columns
+    debug_checks: bool = False  # run lightweight monotonicity and RH checks
 
 
 @dataclass
@@ -83,6 +95,9 @@ class KineticsConfig:
     RH_lo_pct_ref: float = 30.0
     RH_hi_pct_ref: float = 40.0
     t_split_min_ref: float = 60.0
+
+    # Debugging
+    debug_keff: bool = False
 
 
 @dataclass

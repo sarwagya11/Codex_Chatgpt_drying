@@ -40,12 +40,15 @@ def plot_temperatures(
     fig, ax = plt.subplots(figsize=(8, 5))
 
     # Plot outlet temperatures for each recirculation ratio
-    for r, res in sorted(results_by_r.items()):
+    linestyles = ["-", "--", "-.", ":"]
+
+    for idx, (r, res) in enumerate(sorted(results_by_r.items())):
         df = res.df
         if df.empty:
             continue
         times_min = df["time_s"] / 60.0
-        ax.plot(times_min, df["T_out_C"], label=f"r = {r:.2f}")
+        style = linestyles[idx % len(linestyles)]
+        ax.plot(times_min, df["T_out_C"], linestyle=style, label=f"r = {r:.2f}")
 
     # Use the first non-empty result for common ambient and inlet traces
     for res in results_by_r.values():
@@ -84,13 +87,16 @@ def plot_humidity_and_MR(
     fig.suptitle(title)
     ax_rh, ax_mr = axes
 
-    for r, res in sorted(results_by_r.items()):
+    linestyles = ["-", "--", "-.", ":"]
+
+    for idx, (r, res) in enumerate(sorted(results_by_r.items())):
         df = res.df
         if df.empty:
             continue
         times_min = df["time_s"] / 60.0
-        ax_rh.plot(times_min, 100.0 * df["RH_out_frac"], label=f"r = {r:.2f}")
-        ax_mr.plot(times_min, df["MR"], label=f"r = {r:.2f}")
+        style = linestyles[idx % len(linestyles)]
+        ax_rh.plot(times_min, 100.0 * df["RH_out_frac"], linestyle=style, label=f"r = {r:.2f}")
+        ax_mr.plot(times_min, df["MR"], linestyle=style, label=f"r = {r:.2f}")
 
         if {"X_tray_0", "X_tray_last"}.issubset(df.columns):
             X0_first = df["X_tray_0"].iloc[0]
@@ -133,6 +139,7 @@ def plot_energy_and_water(
     results_by_r: Dict[float, Phase1Result],
     out_path: Path,
     title: str = "Cumulative heater energy and water removed",
+    n_trays: int | None = None,
 ) -> None:
     """
     Plot cumulative heater energy and cumulative water removed for multiple recirculation ratios.
@@ -146,13 +153,33 @@ def plot_energy_and_water(
     fig.suptitle(title)
     ax_energy, ax_water = axes
 
-    for r, res in sorted(results_by_r.items()):
+    linestyles = ["-", "--", "-.", ":"]
+
+    for idx, (r, res) in enumerate(sorted(results_by_r.items())):
         df = res.df
         if df.empty:
             continue
         times_min = df["time_s"] / 60.0
-        ax_energy.plot(times_min, df["Q_heater_cum_kJ"], label=f"r = {r:.2f}")
-        ax_water.plot(times_min, df["m_w_cum_kg"], label=f"r = {r:.2f}")
+        style = linestyles[idx % len(linestyles)]
+        ax_energy.plot(times_min, df["Q_heater_cum_kJ"], linestyle=style, label=f"r = {r:.2f}")
+
+        tray_totals = []
+        if n_trays is None:
+            tray_dm_cols = sorted(col for col in df.columns if col.startswith("dm_w_tray"))
+            for col in tray_dm_cols:
+                tray_totals.append(df[col].sum())
+        else:
+            for j in range(n_trays):
+                col = f"dm_w_tray{j}_kg"
+                tray_totals.append(df[col].sum() if col in df.columns else float("nan"))
+
+        if tray_totals:
+            tray_summary = ", ".join(f"{i}: {total:.3f} kg" for i, total in enumerate(tray_totals))
+            label_water = f"r = {r:.2f} (tray dm: {tray_summary})"
+        else:
+            label_water = f"r = {r:.2f}"
+
+        ax_water.plot(times_min, df["m_w_cum_kg"], linestyle=style, label=label_water)
 
     ax_energy.set_title("Cumulative heater energy")
     ax_energy.set_xlabel("Time [min]")
@@ -221,6 +248,8 @@ def summarize_SEC_vs_r(
 def plot_MR_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Path, n_trays: int) -> None:
     """Plot tray-wise moisture ratios vs time for each recirculation ratio."""
 
+    colors = plt.cm.tab10.colors
+
     for r, res in sorted(results_by_r.items()):
         df = res.df
         if df.empty:
@@ -232,7 +261,7 @@ def plot_MR_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Pat
         for j in range(n_trays):
             col = f"MR_tray{j}"
             if col in df.columns:
-                ax.plot(t_min, df[col], label=f"Tray {j}")
+                ax.plot(t_min, df[col], label=f"Tray {j}", color=colors[j % len(colors)])
 
         ax.set_xlabel("Time [min]")
         ax.set_ylabel("Moisture ratio [-]")
@@ -246,6 +275,8 @@ def plot_MR_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Pat
 def plot_air_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Path, n_trays: int) -> None:
     """Plot air outlet temperature and RH per tray for each recirculation ratio."""
 
+    colors = plt.cm.tab10.colors
+
     for r, res in sorted(results_by_r.items()):
         df = res.df
         if df.empty:
@@ -258,9 +289,9 @@ def plot_air_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Pa
             T_col = f"T_tray{j}_out_C"
             RH_col = f"RH_tray{j}_out_frac"
             if T_col in df.columns:
-                axT.plot(t_min, df[T_col], label=f"Tray {j}")
+                axT.plot(t_min, df[T_col], label=f"Tray {j}", color=colors[j % len(colors)])
             if RH_col in df.columns:
-                axRH.plot(t_min, df[RH_col] * 100.0, label=f"Tray {j}")
+                axRH.plot(t_min, df[RH_col] * 100.0, label=f"Tray {j}", color=colors[j % len(colors)])
 
         axT.set_ylabel("T outlet [°C]")
         axT.set_title(f"Air outlet per tray (r = {r:.2f})")
@@ -271,4 +302,47 @@ def plot_air_trays_per_r(results_by_r: Dict[float, Phase1Result], output_dir: Pa
 
         fig.tight_layout()
         fig.savefig(output_dir / f"phase1_air_trays_r{r:.2f}.png", dpi=150)
+        plt.close(fig)
+
+
+def plot_final_tray_profiles(
+    results_by_r: Dict[float, Phase1Result],
+    output_dir: Path,
+    n_trays: int,
+) -> None:
+    """Plot final-step moisture and air-state profiles across trays for each r."""
+
+    colors = plt.cm.tab10.colors
+
+    for r, res in sorted(results_by_r.items()):
+        df = res.df
+        if df.empty:
+            continue
+
+        last_row = df.iloc[-1]
+        fig, (ax_m, ax_air) = plt.subplots(2, 1, figsize=(7, 7))
+
+        X_vals = []
+        T_vals = []
+        RH_vals = []
+        for j in range(n_trays):
+            X_vals.append(last_row.get(f"X_tray_{j}", float("nan")))
+            T_vals.append(last_row.get(f"T_tray{j}_out_C", float("nan")))
+            RH_vals.append(100.0 * last_row.get(f"RH_tray{j}_out_frac", float("nan")))
+
+        ax_m.bar(range(n_trays), X_vals, color=[colors[j % len(colors)] for j in range(n_trays)])
+        ax_m.set_title(f"Final tray moisture (r = {r:.2f})")
+        ax_m.set_xlabel("Tray index")
+        ax_m.set_ylabel("X_db [kg/kg dry]")
+
+        ax_air.plot(range(n_trays), T_vals, marker="o", label="T_out [°C]")
+        ax_air.plot(range(n_trays), RH_vals, marker="s", label="RH_out [%]")
+        ax_air.set_title("Final air profile along trays")
+        ax_air.set_xlabel("Tray index")
+        ax_air.set_ylabel("Air state")
+        ax_air.grid(True, alpha=0.3)
+        ax_air.legend()
+
+        fig.tight_layout()
+        fig.savefig(output_dir / f"phase1_tray_profiles_r{r:.2f}.png", dpi=150)
         plt.close(fig)
