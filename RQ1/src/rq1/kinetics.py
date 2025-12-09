@@ -364,7 +364,7 @@ def compute_dm_w_air_capacity(
         return 0.0
 
     RH_max = cfg.RH_out_max_frac
-    if RH_max <= 0.0 or RH_max >= 1.0:
+    if RH_max <= 0.0 or RH_max > 1.0:
         return float("inf")
 
     h_in = moist_air_enthalpy_kJ_per_kg(T_in_C, omega_in)

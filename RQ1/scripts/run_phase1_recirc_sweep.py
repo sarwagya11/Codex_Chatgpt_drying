@@ -38,6 +38,7 @@ from rq1.phase1_plots import (
     plot_air_trays_per_r,
     plot_humidity_and_MR,
     plot_MR_trays_per_r,
+    plot_final_tray_profiles,
     plot_temperatures,
     summarize_SEC_vs_r,
 )
@@ -154,6 +155,7 @@ def save_results(results_by_r: Dict[float, Phase1Result], output_dir: Path, n_tr
         if has_tray_cols and n_trays > 0:
             plot_MR_trays_per_r(results_by_r, output_dir, n_trays)
             plot_air_trays_per_r(results_by_r, output_dir, n_trays)
+            plot_final_tray_profiles(results_by_r, output_dir, n_trays)
 
 
 def print_summary(results_by_r: Dict[float, Phase1Result]) -> None:

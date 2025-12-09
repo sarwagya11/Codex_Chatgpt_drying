@@ -62,6 +62,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
     m_w_cum = 0.0
     Q_heater_cum_kJ = 0.0
+    m_w_condensed_cum = 0.0
 
     for step_idx, row in enumerate(amb_df.itertuples(index=False)):
         T_amb_C = float(row.T_amb_C)
@@ -69,10 +70,21 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         omega_f = float(humidity_ratio_from_T_RH(T_amb_C, RH_amb_frac))
         h_f = float(moist_air_enthalpy_kJ_per_kg(T_amb_C, omega_f))
 
-        omega_mix = float((1 - r) * omega_f + r * omega_e_prev)
-        h_mix = float((1 - r) * h_f + r * h_e_prev)
-        T_mix_C = float(temperature_from_h_omega_C(h_mix, omega_mix))
-        RH_mix_frac = float(RH_from_T_omega(T_mix_C, omega_mix))
+        omega_mix_raw = float((1 - r) * omega_f + r * omega_e_prev)
+        h_mix_raw = float((1 - r) * h_f + r * h_e_prev)
+        T_mix_C = float(temperature_from_h_omega_C(h_mix_raw, omega_mix_raw))
+        RH_mix_frac = float(RH_from_T_omega(T_mix_C, omega_mix_raw))
+
+        omega_mix = omega_mix_raw
+        h_mix = h_mix_raw
+        m_w_condensed_step = 0.0
+        if RH_mix_frac > 1.0:
+            omega_sat = float(humidity_ratio_from_T_RH(T_mix_C, 1.0))
+            m_w_condensed_step = max(0.0, omega_mix_raw - omega_sat) * m_da * dt_s
+            omega_mix = omega_sat
+            h_mix = float(moist_air_enthalpy_kJ_per_kg(T_mix_C, omega_mix))
+            RH_mix_frac = 1.0
+        m_w_condensed_cum += m_w_condensed_step
 
         T_in_C = T_set_C
         omega_in = omega_mix
@@ -109,6 +121,7 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
         dm_w_list: list[float] = []
         T_tray_out_list: list[float] = []
         RH_tray_out_list: list[float] = []
+        h_tray_out_list: list[float] = []
 
         for i in range(n_trays):
             X_j = X_trays[i]
@@ -169,12 +182,13 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
 
             if RH_air_out > 1.0:
                 T_air_out = float(dewpoint_from_omega_C(omega_air_out))
-                RH_air_out = 1.0
+                RH_air_out = min(RH_air_out, 1.0)
                 h_air_out = float(moist_air_enthalpy_kJ_per_kg(T_air_out, omega_air_out))
 
             dm_w_list.append(dm_w_actual)
             T_tray_out_list.append(T_air_out)
             RH_tray_out_list.append(RH_air_out)
+            h_tray_out_list.append(h_air_out)
 
             T_air_in = T_air_out
             omega_air_in = omega_air_out
@@ -239,8 +253,11 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             record[f"T_tray{i}_out_C"] = T_tray_out_list[i]
             record[f"RH_tray{i}_out_frac"] = RH_tray_out_list[i]
             record[f"dm_w_tray{i}_kg"] = dm_w_list[i]
+            record[f"h_tray{i}_out_kJ_per_kg"] = h_tray_out_list[i]
 
         record["X_tray_last"] = X_trays[-1]
+        record["m_w_condensed_step_kg"] = m_w_condensed_step
+        record["m_w_condensed_cum_kg"] = m_w_condensed_cum
 
         records.append(record)
 
