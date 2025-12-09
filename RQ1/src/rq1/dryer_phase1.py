@@ -42,8 +42,18 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
     T_set_C = cfg.dryer.T_set_C
     X_eq_db = cfg.dryer.X_eq_db
     m_p_dry_total = cfg.dryer.m_p_dry_kg
-    n_trays = max(1, int(cfg.dryer.n_trays))
+    n_trays = max(1, min(int(cfg.dryer.n_trays), int(cfg.dryer.max_trays)))
+    cfg.dryer.n_trays = n_trays
     m_p_tray = m_p_dry_total / n_trays if n_trays > 0 else m_p_dry_total
+    if cfg.dryer.tray_area_m2 is None:
+        rho_bulk = cfg.dryer.product_apparent_density_kg_per_m3
+        thickness = cfg.dryer.product_thickness_m
+        if rho_bulk > 0.0 and thickness > 0.0:
+            tray_area = m_p_tray / (rho_bulk * thickness)
+            cfg.dryer.tray_area_m2 = tray_area
+            print(
+                f"[INFO] Tray area set to {cfg.dryer.tray_area_m2:.3f} m² for {n_trays} trays of {m_p_tray:.2f} kg each."
+            )
     X_db_init = cfg.dryer.X0_db
     X_trays: list[float] = [X_db_init for _ in range(n_trays)]
     MR_trays: list[float] = [1.0 for _ in range(n_trays)]

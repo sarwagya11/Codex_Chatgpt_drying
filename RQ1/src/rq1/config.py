@@ -29,6 +29,10 @@ class DryerConfig:
     tray_depth_m: float | None = None  # flow depth / height of air above product
     air_density_kg_per_m3: float = 1.2  # used only for residence-time estimates
 
+    product_thickness_m: float = 0.006  # Thickness of apple slices (6 mm)
+    product_apparent_density_kg_per_m3: float = 600.0  # Bulk density
+    max_trays: int = 4  # Maximum allowed tray count
+
     enable_tray_diagnostics: bool = True  # controls writing extra per-tray columns
     debug_checks: bool = False  # run lightweight monotonicity and RH checks
 
