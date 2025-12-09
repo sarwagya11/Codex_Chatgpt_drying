@@ -82,12 +82,22 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
     Q_heater_cum_kJ = 0.0
     m_w_condensed_cum = 0.0
 
-    tau_tray_s = None
-    if cfg.dryer.tray_area_m2 is not None and cfg.dryer.tray_depth_m is not None and m_da > 0:
-        V_tray_m3 = cfg.dryer.tray_area_m2 * cfg.dryer.tray_depth_m
-        rho_da = cfg.dryer.air_density_kg_per_m3
-        m_air_in_tray = rho_da * V_tray_m3
-        tau_tray_s = m_air_in_tray / m_da
+    if (
+        cfg.dryer.tray_area_m2 is None
+        or cfg.dryer.tray_depth_m is None
+        or m_da <= 0
+        or cfg.dryer.air_density_kg_per_m3 <= 0
+    ):
+        raise ValueError(
+            "tray_area_m2, tray_depth_m, air_density_kg_per_m3, and m_da_kg_per_s must be set"
+        )
+
+    V_tray_m3 = cfg.dryer.tray_area_m2 * cfg.dryer.tray_depth_m
+    m_air_in_tray = cfg.dryer.air_density_kg_per_m3 * V_tray_m3
+    tau_tray_s = m_air_in_tray / m_da
+    print(
+        f"[INFO] tau_tray_s = {tau_tray_s:.2f} s computed for volume = {V_tray_m3:.3f} m³"
+    )
 
     for step_idx, row in enumerate(amb_df.itertuples(index=False)):
         T_amb_C = float(row.T_amb_C)
