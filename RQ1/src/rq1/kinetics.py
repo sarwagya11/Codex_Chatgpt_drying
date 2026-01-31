@@ -268,6 +268,8 @@ def compute_dm_w_kinetic_first_order(
 
     RH_in_frac = max(0.0, min(1.0, RH_in_frac))
     k_eff = keff_from_state(T_in_C=T_in_C, RH_in_frac=RH_in_frac, cfg=cfg)
+    if cfg.debug_keff:
+        print(f"[Keff LOG] t={time_s:.0f}s | T={T_in_C:.1f}°C | RH={RH_in_frac:.2f} | Keff={k_eff:.5e} s⁻¹")
 
     X_db_new = X_db - k_eff * (X_db - X_eq_db) * dt_s
     X_db_new = max(X_db_new, X_eq_db)

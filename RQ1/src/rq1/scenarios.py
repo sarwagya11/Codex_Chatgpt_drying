@@ -25,6 +25,7 @@ def make_default_kathmandu_summer_phase1() -> SimulationConfig:
     )
 
     kinetics_cfg = KineticsConfig(use_simple_K=True, use_knb_table=False)
+    kinetics_cfg.debug_keff = True
 
     return SimulationConfig(
         ambient=ambient_cfg,

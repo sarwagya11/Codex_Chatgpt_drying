@@ -4,5 +4,17 @@
     "RQ1/src",
     "D:/Masters/RQ5/Codex_chatgpt",
     "D:/Masters/RQ5/Codex_chatgpt/src"
-  ]
+  ],
+  "cursorpyright.analysis.extraPaths": [
+    "RQ1/src",
+    "D:/Masters/RQ5/Codex_chatgpt",
+    "D:/Masters/RQ5/Codex_chatgpt/src"
+  ],
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportGeneralTypeIssues": "none",
+    "reportOptionalMemberAccess": "none",
+    "reportUnboundVariable": "warning",
+    "reportUndefinedVariable": "warning"
+  }
 }

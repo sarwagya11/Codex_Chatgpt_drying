@@ -111,6 +111,8 @@ def run_sweep(args: argparse.Namespace) -> Dict[float, Phase1Result]:
             dt_s=args.dt_s,
             n_trays=args.n_trays,
         )
+        dryer_cfg.tray_depth_m = 0.05  # Sets air depth above product to 5 cm
+
 
         kinetics_cfg = KineticsConfig(
             mode=args.kinetics_mode,
@@ -123,11 +125,11 @@ def run_sweep(args: argparse.Namespace) -> Dict[float, Phase1Result]:
             v_ms_ref=args.v_ref,
             thickness_mm_ref=args.thickness_ref,
         )
-
+        kinetics_cfg.debug_keff = True
         sim_cfg = SimulationConfig(
             ambient=ambient_cfg,
             dryer=dryer_cfg,
-            kinetics=kinetics_cfg,
+            kinetics=kinetics_cfg,   
         )
 
         results_by_r[r] = run_phase1_simulation(sim_cfg)
