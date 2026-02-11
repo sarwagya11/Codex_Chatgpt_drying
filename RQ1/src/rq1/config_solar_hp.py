@@ -31,14 +31,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Literal, Optional, List
 
-# Import chamber geometry module (NEW)
-from rq1.chamber_geometry import (
-    ZoneConfig,
-    MultiZoneConfig,
-    ChamberGeometry,
-    generate_default_zones,
-    calculate_chamber_geometry,
-)
+# Import chamber geometry module removed - single-inlet only
 
 
 class DryerConfiguration(str, Enum):
@@ -196,7 +189,7 @@ class DryerConfig:
     # AIR FLOW PARAMETERS
     # =========================================================================
     # Air flow rate: if 0, calculated from target_velocity
-    m_da_kg_per_s: float = 0.0           # Auto-calculated if 0
+    m_da_kg_per_s: float = 0.185         # Calibrated for 15.7h baseline
     target_velocity_m_s: float = 1.1     # Target air velocity [m/s]
     air_density_kg_per_m3: float = 1.1   # At ~50°C
     
@@ -213,9 +206,9 @@ class DryerConfig:
     r_recirc: float = 0.0
     
     # =========================================================================
-    # MULTI-ZONE CONFIGURATION (NEW)
+    # MULTI-ZONE CONFIGURATION (DISABLED - single-inlet only)
     # =========================================================================
-    multizone: MultiZoneConfig = field(default_factory=MultiZoneConfig)
+    # multizone: MultiZoneConfig = field(default_factory=MultiZoneConfig)
     
     # Diagnostics
     enable_tray_diagnostics: bool = True
@@ -275,10 +268,10 @@ class KineticsConfig:
     t_split_min_ref: float = 120.0  # 2 hours in minutes
 
     # Kinetic parameters (fallback mode)
-    K_ref_1_per_s: float = 0.0005
+    K_ref_1_per_s: float = 0.001  # Calibrated for 15.7h baseline
     K_min_1_per_s: float = 1e-6
     alpha_T_per_C: float = 0.05
-    alpha_RH: float = 1.0
+    alpha_RH: float = 2.0
 
     # Valid ranges (hard limits)
     T_min_valid_C: float = 30.0
@@ -314,10 +307,8 @@ class KineticsConfig:
     k_eff_max: float = 0.1
     RH_out_max_frac: float = 0.95
     min_domega_drive: float = 1e-4
-    enable_air_limit: bool = True
-    debug_keff: bool = False
-
-
+    enable_air_limit: bool = True  # MUST be enabled for correct temperature profiles
+    debug_keff: bool = False  # Disable verbose logging
 @dataclass
 class SimulationConfig:
     """Complete simulation configuration for one run.
@@ -385,10 +376,10 @@ class SimulationConfig:
         self._calculate_geometry()
         
         # =====================================================================
-        # SETUP MULTI-ZONE CONFIGURATION
+        # MULTI-ZONE DISABLED - single-inlet only
         # =====================================================================
-        if self.dryer.multizone.enabled:
-            self._setup_multizone()
+        # if self.dryer.multizone.enabled:
+        #     self._setup_multizone()
         
         # =====================================================================
         # DISPLAY GEOMETRY (if enabled)
@@ -409,12 +400,14 @@ class SimulationConfig:
         
         dryer = self.dryer
         
-        # Fresh mass
-        m_fresh = dryer.m_p_dry_kg * (1 + dryer.X0_db)
-        m_fresh_per_tray = m_fresh / dryer.n_trays
-        
-        # Tray area from loading density
-        tray_area = m_fresh_per_tray / dryer.loading_density_kg_m2
+        # Dry mass per tray
+        m_p_tray = dryer.m_p_dry_kg / dryer.n_trays
+
+        # Tray area from product properties (through-flow design)
+        # This matches the validated setup_simulation() formula
+        rho_bulk = dryer.product_apparent_density_kg_per_m3
+        thickness = dryer.product_thickness_m
+        tray_area = m_p_tray / (rho_bulk * thickness)
         tray_side = tray_area ** 0.5
         
         # Set tray dimensions
@@ -422,16 +415,13 @@ class SimulationConfig:
         dryer.tray_width_m = tray_side
         dryer.tray_area_m2 = tray_area
         
-        # Cross-sectional area for air flow
-        A_cross = dryer.tray_width_m * dryer.air_gap_m
-        
-        # Calculate air mass flow rate for target velocity
-        # m_da = ρ × v × A
+        # Air mass flow rate: use tray area as flow cross-section
+        # (through-flow design: air passes vertically through product bed)
         if dryer.m_da_kg_per_s <= 0:
             dryer.m_da_kg_per_s = (
-                dryer.air_density_kg_per_m3 * 
-                dryer.target_velocity_m_s * 
-                A_cross
+                dryer.air_density_kg_per_m3 *
+                dryer.tray_area_m2 *
+                dryer.target_velocity_m_s
             )
         
         # Chamber dimensions
@@ -442,20 +432,9 @@ class SimulationConfig:
         dryer.chamber_length_m = dryer.tray_length_m + 0.20
         dryer.chamber_width_m = dryer.tray_width_m + 0.20
     
-    def _setup_multizone(self):
-        """Setup multi-zone configuration."""
-        
-        multizone = self.dryer.multizone
-        
-        # Generate zones if not provided
-        if not multizone.zones:
-            multizone.zones = generate_default_zones(
-                n_trays=self.dryer.n_trays,
-                n_zones=multizone.n_zones
-            )
-        
-        # Validate
-        multizone.validate(self.dryer.n_trays)
+    # def _setup_multizone(self):
+    #     """Setup multi-zone configuration - DISABLED."""
+    #     pass
     
     def _display_geometry(self):
         """Display chamber geometry summary."""
@@ -496,23 +475,10 @@ AIR FLOW:
   Cross-section area:        {A_cross:.4f} m²
 """)
         
-        # Zone information
-        if dryer.multizone.enabled:
-            print("ZONES (Multi-Zone ENABLED):")
-            print(f"  Number of zones:           {len(dryer.multizone.zones)}")
-            print(f"  Mixing efficiency:         {dryer.multizone.mixing_efficiency*100:.0f}%")
-            print(f"  Number of inlets:          {len(dryer.multizone.zones)}")
-            print(f"  Number of outlets:         1 (single exhaust)")
-            print()
-            for zone in dryer.multizone.zones:
-                flow_kg_s = dryer.m_da_kg_per_s * zone.flow_fraction
-                inlet = "Fresh only" if not zone.receives_upstream_exhaust else "Mixed"
-                print(f"  {zone.name}: Trays [{zone.tray_indices[0]}-{zone.tray_indices[-1]}], "
-                      f"Flow: {zone.flow_fraction*100:.0f}% = {flow_kg_s:.4f} kg/s ({inlet})")
-        else:
-            print("ZONES (Single-Inlet):")
-            print(f"  Number of inlets:          1")
-            print(f"  Number of outlets:         1")
+        # Zone information - single-inlet only
+        print("ZONES (Single-Inlet):")
+        print(f"  Number of inlets:          1")
+        print(f"  Number of outlets:         1")
         
         print("="*70 + "\n")
 
@@ -546,12 +512,10 @@ def make_config_A_HP_only(
     m_p_dry_kg: float = 10.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
-    enable_multizone: bool = False,
-    n_zones: int = 3,
     display_geometry: bool = True,
 ) -> SimulationConfig:
     """Create Config A (HP-only, 24/7 baseline).
-    
+
     Parameters:
         ambient_csv: Path to weather data CSV
         T_set_C: Target drying temperature [°C]
@@ -559,11 +523,9 @@ def make_config_A_HP_only(
         m_p_dry_kg: Dry mass of product [kg]
         n_trays: Number of trays
         target_velocity: Target air velocity [m/s]
-        enable_multizone: Enable multi-zone design
-        n_zones: Number of zones (if multi-zone enabled)
         display_geometry: Display geometry on creation
     """
-    
+
     cfg = SimulationConfig(
         config_type=DryerConfiguration.CONFIG_A,
         ambient=AmbientConfig(csv_path=ambient_csv),
@@ -572,15 +534,11 @@ def make_config_A_HP_only(
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
-            multizone=MultiZoneConfig(
-                enabled=enable_multizone,
-                n_zones=n_zones,
-            ),
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
     )
-    
+
     return cfg
 
 
@@ -592,12 +550,10 @@ def make_config_B_solar_HP_series(
     m_p_dry_kg: float = 10.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
-    enable_multizone: bool = False,
-    n_zones: int = 3,
     display_geometry: bool = True,
 ) -> SimulationConfig:
     """Create Config B (Solar → HP condenser series)."""
-    
+
     cfg = SimulationConfig(
         config_type=DryerConfiguration.CONFIG_B,
         ambient=AmbientConfig(csv_path=ambient_csv),
@@ -607,15 +563,11 @@ def make_config_B_solar_HP_series(
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
-            multizone=MultiZoneConfig(
-                enabled=enable_multizone,
-                n_zones=n_zones,
-            ),
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
     )
-    
+
     return cfg
 
 
@@ -627,12 +579,10 @@ def make_config_C_solar_HP_evap(
     m_p_dry_kg: float = 10.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
-    enable_multizone: bool = False,
-    n_zones: int = 3,
     display_geometry: bool = True,
 ) -> SimulationConfig:
     """Create Config C (Solar-assisted HP evaporator)."""
-    
+
     cfg = SimulationConfig(
         config_type=DryerConfiguration.CONFIG_C,
         ambient=AmbientConfig(csv_path=ambient_csv),
@@ -642,15 +592,11 @@ def make_config_C_solar_HP_evap(
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
-            multizone=MultiZoneConfig(
-                enabled=enable_multizone,
-                n_zones=n_zones,
-            ),
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
     )
-    
+
     return cfg
 
 
@@ -661,12 +607,10 @@ def make_config_D_solar_only(
     m_p_dry_kg: float = 10.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
-    enable_multizone: bool = False,
-    n_zones: int = 3,
     display_geometry: bool = True,
 ) -> SimulationConfig:
     """Create Config D (Solar-only, no HP)."""
-    
+
     cfg = SimulationConfig(
         config_type=DryerConfiguration.CONFIG_D,
         ambient=AmbientConfig(csv_path=ambient_csv),
@@ -676,15 +620,11 @@ def make_config_D_solar_only(
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
-            multizone=MultiZoneConfig(
-                enabled=enable_multizone,
-                n_zones=n_zones,
-            ),
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
     )
-    
+
     return cfg
 
 
@@ -696,12 +636,10 @@ def make_config_E_solar_evap_cond_cascade(
     m_p_dry_kg: float = 10.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
-    enable_multizone: bool = False,
-    n_zones: int = 3,
     display_geometry: bool = True,
 ) -> SimulationConfig:
     """Create Config E (Solar → HP evap → HP cond cascade)."""
-    
+
     cfg = SimulationConfig(
         config_type=DryerConfiguration.CONFIG_E,
         ambient=AmbientConfig(csv_path=ambient_csv),
@@ -711,15 +649,11 @@ def make_config_E_solar_evap_cond_cascade(
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
-            multizone=MultiZoneConfig(
-                enabled=enable_multizone,
-                n_zones=n_zones,
-            ),
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
     )
-    
+
     return cfg
 
 
@@ -738,27 +672,14 @@ if __name__ == "__main__":
         ambient_csv=Path("weather/kathmandu.csv"),
         T_set_C=50.0,
         m_p_dry_kg=10.0,  # 75 kg fresh apples
-        enable_multizone=False,
     )
     
-    # Test 2: Config A with multi-zone
-    print("\n>>> Test 2: Config A (HP-only) - Multi-Zone (3 zones)")
-    cfg_a_mz = make_config_A_HP_only(
-        ambient_csv=Path("weather/kathmandu.csv"),
-        T_set_C=50.0,
-        m_p_dry_kg=10.0,
-        enable_multizone=True,
-        n_zones=3,
-    )
-    
-    # Test 3: Config E with multi-zone
-    print("\n>>> Test 3: Config E (Cascade) - Multi-Zone (3 zones)")
+    # Test 2: Config E cascade
+    print("\n>>> Test 2: Config E (Cascade) - Single Inlet")
     cfg_e = make_config_E_solar_evap_cond_cascade(
         ambient_csv=Path("weather/kathmandu.csv"),
         solar_area_m2=12.0,
         m_p_dry_kg=10.0,
-        enable_multizone=True,
-        n_zones=3,
     )
     
     print("\n" + "="*70)
@@ -772,10 +693,6 @@ To change product amount:
 
 To change air velocity (affects m_da):
     target_velocity_m_s = 1.1   → default (0.8-1.5 typical)
-
-To enable multi-zone:
-    enable_multizone = True
-    n_zones = 3          → 3 zones (recommended for 10 trays)
 
 Air mass flow rate equation:
     m_da = ρ_air × v_target × A_cross
