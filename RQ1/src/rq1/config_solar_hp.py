@@ -189,7 +189,7 @@ class DryerConfig:
     # AIR FLOW PARAMETERS
     # =========================================================================
     # Air flow rate: if 0, calculated from target_velocity
-    m_da_kg_per_s: float = 0.185         # Calibrated for 15.7h baseline
+    m_da_kg_per_s: float = 0.0           # Auto-calculated from velocity
     target_velocity_m_s: float = 1.1     # Target air velocity [m/s]
     air_density_kg_per_m3: float = 1.1   # At ~50°C
     
@@ -268,7 +268,7 @@ class KineticsConfig:
     t_split_min_ref: float = 120.0  # 2 hours in minutes
 
     # Kinetic parameters (fallback mode)
-    K_ref_1_per_s: float = 0.001  # Calibrated for 15.7h baseline
+    K_ref_1_per_s: float = 1e-4  # 0.0001
     K_min_1_per_s: float = 1e-6
     alpha_T_per_C: float = 0.05
     alpha_RH: float = 2.0
