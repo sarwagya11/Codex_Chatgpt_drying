@@ -235,8 +235,12 @@ class DryerConfig:
         return self.product_thickness_m + self.tray_frame_m + self.air_gap_m
     
     def get_cross_section_m2(self) -> float:
-        """Calculate air flow cross-sectional area."""
-        return self.tray_width_m * self.air_gap_m
+        """Calculate air flow cross-sectional area.
+
+        For through-flow design (air enters top, flows through each tray):
+        Cross-section = tray area
+        """
+        return self.tray_area_m2
 
 
 @dataclass
@@ -247,7 +251,7 @@ class KineticsConfig:
     model_type: str = "midilli"
     phase2_models_root: Optional[Path] = None
     fallback_to_page: bool = True
-    use_knb_table: bool = False  # Use pre-computed k,n,b table (fallback mode)
+    use_knb_table: bool = True  # Use pre-computed k,n,b table (fallback mode)
     knb_csv_path: Optional[Path] = None
 
     # Reference conditions
@@ -442,7 +446,8 @@ class SimulationConfig:
         dryer = self.dryer
         m_fresh = dryer.m_p_dry_kg * (1 + dryer.X0_db)
         m_water = dryer.m_p_dry_kg * (dryer.X0_db - dryer.X_final_db)
-        A_cross = dryer.tray_width_m * dryer.air_gap_m
+        # Through-flow: air flows through tray area
+        A_cross = dryer.tray_area_m2
         v_actual = dryer.m_da_kg_per_s / (dryer.air_density_kg_per_m3 * A_cross)
         
         print("\n" + "="*70)
