@@ -200,15 +200,13 @@ def run_phase1_simulation(cfg: SimulationConfig) -> Phase1Result:
             )
 
             m_w_rate_kg_per_s = dm_w_actual / dt_s if dt_s > 0 else 0.0
-            omega_air_out = (
-                float(omega_air_in + m_w_rate_kg_per_s / m_da) if m_da > 0 else omega_air_in
-            )
+            d_omega = m_w_rate_kg_per_s / m_da if m_da > 0 else 0.0
+            omega_air_out = omega_air_in + d_omega
 
-            if m_da > 0 and dt_s > 0:
-                Qdot_latent_kW = m_w_rate_kg_per_s * h_fg
-                h_air_out = h_air_in - Qdot_latent_kW / m_da
-            else:
-                h_air_out = h_air_in
+            # Correct energy balance: constant-enthalpy humidification
+            # with small liquid water sensible heat correction
+            h_air_out = h_air_in + d_omega * 4.186 * air_T
+
             T_air_out = float(temperature_from_h_omega_C(h_air_out, omega_air_out))
             RH_air_out = float(RH_from_T_omega(T_air_out, omega_air_out))
 

@@ -193,15 +193,15 @@ def simulate_drying_chamber(
         MR_trays_new.append(MR_new)
         
         m_w_rate = dm_w / dt_s if dt_s > 0 else 0.0
-        omega_out = omega_air + m_w_rate / m_da if m_da > 0 else omega_air
+        d_omega = m_w_rate / m_da if m_da > 0 else 0.0
+        omega_out = omega_air + d_omega
 
-        # Explicit energy balance: latent heat of evaporation cools the air
-        # This matches the Phase-1 dryer_phase1.py approach (validated baseline)
-        if m_da > 0 and dt_s > 0:
-            Qdot_latent_kW = m_w_rate * h_fg
-            h_out = h_air - Qdot_latent_kW / m_da
-        else:
-            h_out = h_air
+        # Correct energy balance: near-constant-enthalpy humidification
+        # The ASHRAE formula h = 1.006*T + omega*(2501 + 1.86*T) already
+        # accounts for latent heat through the 2501*omega term.
+        # We only add the small liquid water sensible heat correction:
+        #   liquid water enters at product temperature T_air with cp_w ≈ 4.186 kJ/(kg·K)
+        h_out = h_air + d_omega * 4.186 * T_air
 
         T_out = float(temperature_from_h_omega_C(h_out, omega_out))
         RH_out = float(RH_from_T_omega(T_out, omega_out))

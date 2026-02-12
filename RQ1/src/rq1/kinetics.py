@@ -269,7 +269,7 @@ def compute_dm_w_kinetic_first_order(
     RH_in_frac = max(0.0, min(1.0, RH_in_frac))
     k_eff = keff_from_state(T_in_C=T_in_C, RH_in_frac=RH_in_frac, cfg=cfg)
     if cfg.debug_keff:
-        print(f"[Keff LOG] t={time_s:.0f}s | T={T_in_C:.1f}°C | RH={RH_in_frac:.2f} | Keff={k_eff:.5e} s⁻¹")
+        print(f"[Keff LOG] t={time_s:.0f}s | T={T_in_C:.1f}°C | RH={RH_in_frac:.2f} | Keff={k_eff:.5e} s^-1")
 
     X_db_new = X_db - k_eff * (X_db - X_eq_db) * dt_s
     X_db_new = max(X_db_new, X_eq_db)
@@ -379,8 +379,8 @@ def compute_dm_w_air_capacity(
         omega_out = omega_in + domega
         if omega_out <= 0.0:
             return 0.0
-        m_w_rate_kg_per_s = m_da_kg_per_s * domega
-        h_out = h_in - m_w_rate_kg_per_s * h_fg_kJ_per_kg / m_da_kg_per_s
+        # Correct: constant-enthalpy humidification + liquid water correction
+        h_out = h_in + domega * 4.186 * T_in_C
         T_out_C = temperature_from_h_omega_C(h_out, omega_out)
         # Avoid extreme negative temperatures that can overflow Tetens correlation.
         if T_out_C < -60.0:
