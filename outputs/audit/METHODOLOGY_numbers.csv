@@ -1,0 +1,51 @@
+phase,metric,value,source
+Phase A,K_eff calls logged,2410,phase_a_summary.json
+Phase A,K_eff calls bit-equal to M1 formula,2410,phase_a_summary.json
+Phase A,Max relative error K_logged vs K_recomputed,0.0,phase_a_summary.json
+Phase A,Reads of dead Ea_over_R_K during sim,0,phase_a_summary.json
+Phase A,"Live K_ref [1/s] @ 50C,RH=0,v=1.1,d=6mm",0.00016344126996946696,phase_a_summary.json
+Phase A,Live Ea/R [K],2711.212926875777,phase_a_summary.json
+Phase A,Live alpha_RH,1.749853662325222,phase_a_summary.json
+Phase A,Live gamma_v,0.4417482998603077,phase_a_summary.json
+Phase A,Live delta_d,0.6564790741099102,phase_a_summary.json
+Phase A,R^2(ln K) of OLS log-linear fit,0.8977177306863791,phase_a_summary.json
+Phase B,M1 multi-start RMSE range,1.0755285551056204e-15,phase_b_summary.json
+Phase B,M1 starts converged to global min,10/10,phase_b_summary.json
+Phase B,M2 multi-start RMSE range,0.11402525048564022,phase_b_summary.json
+Phase B,M2 starts converged to global min,7/10,phase_b_summary.json
+Phase C,M1 LOCO mean RMSE_MR,0.05277970925661075,phase_c_bootstrap.json
+Phase C,M2 LOCO mean RMSE_MR,0.04039478664943346,phase_c_bootstrap.json
+Phase C,M3 LOCO mean RMSE_MR,0.06853106408461539,phase_c_bootstrap.json
+Phase C,m1_minus_m2 bootstrap mean,0.012384922607177285,phase_c_bootstrap.json
+Phase C,m1_minus_m2 95% CI lo,-0.0018582529228539464,phase_c_bootstrap.json
+Phase C,m1_minus_m2 95% CI hi,0.022100580254800446,phase_c_bootstrap.json
+Phase C,m2_minus_m3 bootstrap mean,-0.02813627743518192,phase_c_bootstrap.json
+Phase C,m2_minus_m3 95% CI lo,-0.047500290698187154,phase_c_bootstrap.json
+Phase C,m2_minus_m3 95% CI hi,-0.008777559227458214,phase_c_bootstrap.json
+Phase C,m1_minus_m3 bootstrap mean,-0.01575135482800464,phase_c_bootstrap.json
+Phase C,m1_minus_m3 95% CI lo,-0.033402696368329286,phase_c_bootstrap.json
+Phase C,m1_minus_m3 95% CI hi,-0.0001203197395540317,phase_c_bootstrap.json
+Phase D,SEC A kathmandu M1,0.716514,phase_d_sec_summary.csv
+Phase D,t_dry A kathmandu M1,13.85,phase_d_sec_summary.csv
+Phase D,SEC A kathmandu M2,0.796351,phase_d_sec_summary.csv
+Phase D,t_dry A kathmandu M2,15.2,phase_d_sec_summary.csv
+Phase D,SEC A biratnagar M1,0.54263,phase_d_sec_summary.csv
+Phase D,t_dry A biratnagar M1,14.45,phase_d_sec_summary.csv
+Phase D,SEC A biratnagar M2,0.570611,phase_d_sec_summary.csv
+Phase D,t_dry A biratnagar M2,15.0667,phase_d_sec_summary.csv
+Phase D,SEC E2 kathmandu M1,0.196987,phase_d_sec_summary.csv
+Phase D,t_dry E2 kathmandu M1,13.85,phase_d_sec_summary.csv
+Phase D,SEC E2 kathmandu M2,0.213378,phase_d_sec_summary.csv
+Phase D,t_dry E2 kathmandu M2,15.2,phase_d_sec_summary.csv
+Phase D,SEC E2 biratnagar M1,0.129056,phase_d_sec_summary.csv
+Phase D,t_dry E2 biratnagar M1,14.45,phase_d_sec_summary.csv
+Phase D,SEC E2 biratnagar M2,0.130041,phase_d_sec_summary.csv
+Phase D,t_dry E2 biratnagar M2,15.0667,phase_d_sec_summary.csv
+Phase E,M1 Ea [kJ/mol],31.07984957677356,phase_e_summary.json
+Phase E,M1 Ea profile 95% CI lo [kJ/mol],28.56447600873146,phase_e_summary.json
+Phase E,M1 Ea profile 95% CI hi [kJ/mol],33.59522314481566,phase_e_summary.json
+Phase E,M2 Ea [kJ/mol],15.358500197281176,phase_e_summary.json
+Phase E,M2 Ea profile 95% CI lo [kJ/mol],3.4515379471673135,phase_e_summary.json
+Phase E,M2 Ea profile 95% CI hi [kJ/mol],27.265462447395038,phase_e_summary.json
+Phase E,Apple literature Ea min [kJ/mol],19.96,phase_e_summary.json
+Phase E,Apple literature Ea max [kJ/mol],30.93,phase_e_summary.json

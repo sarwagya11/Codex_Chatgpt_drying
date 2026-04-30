@@ -1,0 +1,126 @@
+{
+  "runs": [
+    {
+      "SEC": 0.7165136206450501,
+      "m_w_cum_kg": 19.342460593248955,
+      "time_h": 13.85,
+      "W_comp_cum_kWh": 13.519260382390335,
+      "W_fan_cum_kWh": 0.3398760894626765,
+      "Q_solar_cum_kWh": 0.0,
+      "config": "A",
+      "location": "kathmandu",
+      "model": "M1"
+    },
+    {
+      "SEC": 0.7963511732757775,
+      "m_w_cum_kg": 19.309212936923366,
+      "time_h": 15.2,
+      "W_comp_cum_kWh": 15.003949389755286,
+      "W_fan_cum_kWh": 0.3729649875954595,
+      "Q_solar_cum_kWh": 0.0,
+      "config": "A",
+      "location": "kathmandu",
+      "model": "M2"
+    },
+    {
+      "SEC": 0.5426298820051401,
+      "m_w_cum_kg": 19.3209158351083,
+      "time_h": 14.45,
+      "W_comp_cum_kWh": 10.125025445685313,
+      "W_fan_cum_kWh": 0.35908083415074354,
+      "Q_solar_cum_kWh": 0.0,
+      "config": "A",
+      "location": "biratnagar",
+      "model": "M1"
+    },
+    {
+      "SEC": 0.5706109541945069,
+      "m_w_cum_kg": 19.289288220301668,
+      "time_h": 15.066666666666666,
+      "W_comp_cum_kWh": 10.63229188188138,
+      "W_fan_cum_kWh": 0.37438727523781495,
+      "Q_solar_cum_kWh": 0.0,
+      "config": "A",
+      "location": "biratnagar",
+      "model": "M2"
+    },
+    {
+      "SEC": 0.19698663881950945,
+      "m_w_cum_kg": 19.342460593248955,
+      "time_h": 13.85,
+      "W_comp_cum_kWh": 3.4703302093002497,
+      "W_fan_cum_kWh": 0.3398760894626765,
+      "Q_solar_cum_kWh": 10.316256729325758,
+      "config": "E2",
+      "location": "kathmandu",
+      "model": "M1"
+    },
+    {
+      "SEC": 0.2133779118323049,
+      "m_w_cum_kg": 19.309212936923366,
+      "time_h": 15.2,
+      "W_comp_cum_kWh": 3.7471945480105755,
+      "W_fan_cum_kWh": 0.3729649875954595,
+      "Q_solar_cum_kWh": 10.354080505415192,
+      "config": "E2",
+      "location": "kathmandu",
+      "model": "M2"
+    },
+    {
+      "SEC": 0.1290556419817452,
+      "m_w_cum_kg": 19.3209158351083,
+      "time_h": 14.45,
+      "W_comp_cum_kWh": 2.1343923626244248,
+      "W_fan_cum_kWh": 0.35908083415074354,
+      "Q_solar_cum_kWh": 18.541391486780633,
+      "config": "E2",
+      "location": "biratnagar",
+      "model": "M1"
+    },
+    {
+      "SEC": 0.1300410963951915,
+      "m_w_cum_kg": 19.289288220301668,
+      "time_h": 15.066666666666666,
+      "W_comp_cum_kWh": 2.1340129136130663,
+      "W_fan_cum_kWh": 0.37438727523781495,
+      "Q_solar_cum_kWh": 18.60211404219532,
+      "config": "E2",
+      "location": "biratnagar",
+      "model": "M2"
+    }
+  ],
+  "sec_delta": [
+    {
+      "config": "A",
+      "location": "biratnagar",
+      "M1": 0.5426298820051401,
+      "M2": 0.5706109541945069,
+      "SEC_delta_M2_minus_M1": 0.02798107218936685,
+      "SEC_rel_delta_pct": 5.156566771805943
+    },
+    {
+      "config": "A",
+      "location": "kathmandu",
+      "M1": 0.7165136206450501,
+      "M2": 0.7963511732757775,
+      "SEC_delta_M2_minus_M1": 0.07983755263072745,
+      "SEC_rel_delta_pct": 11.142503133276477
+    },
+    {
+      "config": "E2",
+      "location": "biratnagar",
+      "M1": 0.1290556419817452,
+      "M2": 0.1300410963951915,
+      "SEC_delta_M2_minus_M1": 0.0009854544134463017,
+      "SEC_rel_delta_pct": 0.7635887887688732
+    },
+    {
+      "config": "E2",
+      "location": "kathmandu",
+      "M1": 0.19698663881950945,
+      "M2": 0.2133779118323049,
+      "SEC_delta_M2_minus_M1": 0.016391273012795443,
+      "SEC_rel_delta_pct": 8.321007511486133
+    }
+  ]
+}

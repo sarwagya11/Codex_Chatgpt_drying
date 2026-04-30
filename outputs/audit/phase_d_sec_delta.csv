@@ -1,0 +1,5 @@
+config,location,M1,M2,SEC_delta_M2_minus_M1,SEC_rel_delta_pct
+A,biratnagar,0.54263,0.570611,0.0279811,5.15657
+A,kathmandu,0.716514,0.796351,0.0798376,11.1425
+E2,biratnagar,0.129056,0.130041,0.000985454,0.763589
+E2,kathmandu,0.196987,0.213378,0.0163913,8.32101

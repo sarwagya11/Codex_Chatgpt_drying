@@ -1,0 +1,118 @@
+{
+  "M1": {
+    "n_obs": 1573,
+    "n_par": 5,
+    "sigma2": 0.0022019111194363206,
+    "params": {
+      "logK_ref": -8.469626915706325,
+      "Ea_over_R_K": 3738.254700117099,
+      "alpha_RH": 1.9647369918001463,
+      "gamma_v": 0.4012415063144844,
+      "delta_d": 0.5892887118155353
+    },
+    "standard_errors": {
+      "logK_ref": 0.038917131563748625,
+      "Ea_over_R_K": 158.76481283554332,
+      "alpha_RH": 0.09628827334463372,
+      "gamma_v": 0.020943762963028252,
+      "delta_d": 0.021342409364216556
+    },
+    "Ea_kJ_per_mol": 31.07984957677356,
+    "Ea_kJ_per_mol_se_jac": 1.3199706539147071,
+    "Ea_kJ_per_mol_se_profile": 2.515373568042099,
+    "Ea_kJ_per_mol_95CI_profile": [
+      28.56447600873146,
+      33.59522314481566
+    ],
+    "Ea_over_R_K": 3738.254700117099,
+    "Ea_over_R_K_95CI_profile": [
+      3435.7079635231494,
+      4040.801436711049
+    ],
+    "K_at_design_T45_RH15_v1p1_d6mm": {
+      "mean": 0.00013024543012223812,
+      "std": 3.3187548850184272e-06,
+      "p2p5": 0.00012289707475244185,
+      "p97p5": 0.0001363096775267326,
+      "t63_min_mean": 127.96354275942461
+    }
+  },
+  "M2": {
+    "n_obs": 1573,
+    "n_par": 7,
+    "sigma2": 0.0020709896400953744,
+    "params": {
+      "logA": -0.7513997516939737,
+      "Ea_J_per_mol": 15358.500197281175,
+      "n0": 1.242820054511677,
+      "n_T": 0.004429933431990898,
+      "n_v": 0.09268946915506665,
+      "b0": 4.145455359469439e-05,
+      "b_RH": 4.905915017424814e-05
+    },
+    "standard_errors": {
+      "logA": 0.05274502177371012,
+      "Ea_J_per_mol": 1.9673807310665397e-05,
+      "n0": 0.010945124718075476,
+      "n_T": 0.00030312570844488225,
+      "n_v": 0.0048592982910742434,
+      "b0": 9.052684063320307e-06,
+      "b_RH": 1.8929692466061988e-06
+    },
+    "Ea_kJ_per_mol": 15.358500197281176,
+    "Ea_kJ_per_mol_se_jac": 1.9673807310665397e-08,
+    "Ea_kJ_per_mol_se_profile": 11.906962250113862,
+    "Ea_kJ_per_mol_95CI_profile": [
+      3.4515379471673135,
+      27.265462447395038
+    ],
+    "Ea_over_R_K": 1847.305773067257,
+    "Ea_over_R_K_95CI_profile": [
+      415.14769631552963,
+      3279.4638498189847
+    ],
+    "K_at_design_T45_RH15_v1p1_t60min": {
+      "mean": 7.127834252057725e-05,
+      "std": 6.677272010162323e-07,
+      "p2p5": 6.998659270321282e-05,
+      "p97p5": 7.248143387677319e-05,
+      "t63_min_mean": 233.82511541784504
+    }
+  },
+  "literature_apple_Ea_kJ_per_mol": [
+    {
+      "label": "Sacilik & Elicin 2006",
+      "Ea_kJ_per_mol": 19.96,
+      "source": "thin-layer apple, Midilli"
+    },
+    {
+      "label": "Wang et al. 2007",
+      "Ea_kJ_per_mol": 24.23,
+      "source": "thin-layer apple, Page"
+    },
+    {
+      "label": "Doymaz 2010",
+      "Ea_kJ_per_mol": 30.93,
+      "source": "thin-layer apple, Midilli"
+    },
+    {
+      "label": "Meisami-asl et al. 2010",
+      "Ea_kJ_per_mol": 29.26,
+      "source": "thin-layer apple slices"
+    },
+    {
+      "label": "Tzempelikos et al. 2014",
+      "Ea_kJ_per_mol": 27.1,
+      "source": "convective apple drying"
+    },
+    {
+      "label": "Kaleta & Gornicki 2010",
+      "Ea_kJ_per_mol": 22.7,
+      "source": "thin-layer apple, Page"
+    }
+  ],
+  "literature_range_kJ_per_mol": [
+    19.96,
+    30.93
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "n_K_calls": 2410,
+  "n_bit_equal": 2410,
+  "max_relative_error": 0.0,
+  "dead_reads": {
+    "kinetics.Ea_over_R_K": 0
+  },
+  "live_parametric_params": {
+    "K_ref_1_per_s": 0.00016344126996946696,
+    "Ea_over_R_K": 2711.212926875777,
+    "alpha_RH": 1.749853662325222,
+    "gamma_v": 0.4417482998603077,
+    "delta_d": 0.6564790741099102,
+    "T_ref_K": 318.15,
+    "v_ref": 1.1,
+    "d_ref": 6.0,
+    "R2_lnK": 0.8977177306863791
+  },
+  "config_solar_hp_dead_constant": {
+    "Ea_over_R_K_in_config_solar_hp": 3609.0,
+    "kinetics_cfg_Ea_over_R_K_default": 3609.0,
+    "reads_during_sim": 0
+  },
+  "T_RH_v_d_distribution": {
+    "T_min": 21.891750872920586,
+    "T_max": 45.0,
+    "RH_min": 0.10783961823328644,
+    "RH_max": 0.8956491575989374,
+    "v_unique": [
+      1.1
+    ],
+    "d_unique": [
+      6.0
+    ]
+  },
+  "sim_meta": {
+    "config": "A",
+    "location": "kathmandu",
+    "r_recirc": 0.0,
+    "max_hours": 4.0,
+    "weather_file": "D:\\Masters\\RQ5\\Codex_Chatgpt_drying\\RQ1\\data\\ambient\\kathmandu_pvgis_standard.csv",
+    "phase2_root": "D:\\Masters\\RQ5\\Codex_Chatgpt_drying\\RQ1\\outputs",
+    "final_message": "Time limit reached at t=4.0h"
+  }
+}
