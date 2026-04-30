@@ -76,7 +76,6 @@ class KineticsConfig:
     keff_valid_RH_min_frac: float = 0.20
     keff_valid_RH_max_frac: float = 0.60
 
-    Ea_over_R_K: float | None = 3839.0
     max_RH_scale: float = 1.5
 
     # Operating point metadata for Midilli lookup

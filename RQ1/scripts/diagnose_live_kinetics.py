@@ -64,8 +64,10 @@ def main() -> None:
     else:
         print(f"\n(baseline JSON not found at {baseline_path})")
 
-    print("\n=== CONFIG-FILE FALLBACK CONSTANT (NOT used by active path) ===")
-    print(f"  config_solar_hp.py Ea_over_R_K = 3609 K  (only feeds get_K_eff_from_state)")
+    # Ea_over_R_K constant in config_solar_hp.py was removed 2026-04-30:
+    # Phase A audit (outputs/audit/phase_a_summary.json) confirmed it had
+    # zero reads during a live 4 h Config A run, and the only consumer
+    # (kinetics.get_K_eff_from_state) was deleted in the same change.
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.interpolate import NearestNDInterpolator
 
 from .config import KineticsConfig
 from .knb_table import KNBTable
@@ -29,12 +30,52 @@ from .psychro import (
 # Cache for Midilli parameter tables
 _knb_cache: Dict[Path, KNBTable] = {}
 _KEFF_TABLE_DF: Optional[pd.DataFrame] = None
+_KEFF_INTERP: Optional[Tuple] = None  # (linear_interp, nearest_interp, avg_df)
+_PARAMETRIC_PARAMS: Optional[Dict] = None  # Fitted parametric K_eff model
 
 
 @dataclass
 class MidilliCurve:
     t_min: np.ndarray
     MR: np.ndarray
+
+
+# ==============================================================================
+# GAB SORPTION ISOTHERM
+# ==============================================================================
+# Parameters for apple desorption from Kaymak-Ertekin & Gedik (2004),
+# Maroulis et al. (1988), Mbarek & Mihoubi (2019).
+# Fitted to 28 experimental points across 30-60C, RMSE = 0.005 kg/kg db.
+
+_GAB_R = 8.314       # Universal gas constant [J/(mol*K)]
+_GAB_Xm0 = 3.141e-3  # Monolayer pre-exponential [kg/kg db]
+_GAB_dH_xm = 8057.0  # Monolayer enthalpy [J/mol]
+_GAB_C0 = 4.923e-3   # Guggenheim pre-exponential [-]
+_GAB_dHc = 17241.0    # Guggenheim enthalpy [J/mol]
+_GAB_K0 = 0.9904      # Multilayer pre-exponential [-]
+_GAB_dHk = -0.8       # Multilayer enthalpy [J/mol] (K ~ constant)
+
+
+def gab_equilibrium_moisture(T_C: float, RH_frac: float) -> float:
+    """GAB sorption isotherm: equilibrium moisture for apple [kg/kg db].
+
+    X_eq = (Xm * C * K * aw) / ((1 - K*aw) * (1 - K*aw + C*K*aw))
+
+    where aw = RH (fraction), and Xm, C, K are temperature-dependent.
+    """
+    if RH_frac <= 0.0:
+        return 0.0
+    aw = min(RH_frac, 0.95)  # Clamp to avoid singularity at aw=1/K
+
+    T_K = T_C + 273.15
+    Xm = _GAB_Xm0 * math.exp(_GAB_dH_xm / (_GAB_R * T_K))
+    C = _GAB_C0 * math.exp(_GAB_dHc / (_GAB_R * T_K))
+    K = _GAB_K0 * math.exp(_GAB_dHk / (_GAB_R * T_K))
+
+    denom = (1.0 - K * aw) * (1.0 - K * aw + C * K * aw)
+    if denom <= 0.0:
+        return Xm  # Fallback: return monolayer moisture
+    return Xm * C * K * aw / denom
 
 
 def get_keff_table(cfg: KineticsConfig) -> pd.DataFrame:
@@ -44,19 +85,111 @@ def get_keff_table(cfg: KineticsConfig) -> pd.DataFrame:
     Uses cfg.phase2_models_root as the root containing phase2c_for_chamber.csv.
     """
 
-    global _KEFF_TABLE_DF
+    global _KEFF_TABLE_DF, _KEFF_INTERP, _PARAMETRIC_PARAMS
     if _KEFF_TABLE_DF is not None:
         return _KEFF_TABLE_DF
 
     if cfg.phase2_models_root is None:
         raise ValueError("phase2_models_root must be set in KineticsConfig to build K_eff table.")
 
+    _KEFF_INTERP = None  # Clear interpolator when table is rebuilt
+    _PARAMETRIC_PARAMS = None  # Clear parametric model when table is rebuilt
     _KEFF_TABLE_DF = build_keff_table_from_phase2(
         models_root=cfg.phase2_models_root,
         X0_db=cfg.X0_db_ref,
         X_eq_db=cfg.X_eq_db_ref,
     )
     return _KEFF_TABLE_DF
+
+
+def _fit_parametric_keff(cfg: KineticsConfig) -> Optional[Dict]:
+    """Fit K_eff(T, RH, v, d) = K_ref * f_T * f_RH * f_v * f_d from ALL Phase-2 data.
+
+    Log-linear model (OLS):
+        ln(K) = ln(K_ref) + (Ea/R)*(1/T_ref - 1/T) - alpha*RH + gamma*ln(v/v_ref) + delta*ln(d_ref/d)
+
+    Uses all 13 experiments (not filtered by v or d), giving a well-constrained
+    5-parameter fit from temperature, RH, velocity, and thickness sweeps.
+    """
+    global _PARAMETRIC_PARAMS
+    if _PARAMETRIC_PARAMS is not None:
+        return _PARAMETRIC_PARAMS
+
+    table = get_keff_table(cfg)
+    if table.empty or len(table) < 3:
+        return None
+
+    # Reference values
+    T_ref_K = cfg.T_ref_C + 273.15
+    v_ref = cfg.v_ms
+    d_ref = cfg.thickness_mm
+
+    # Data vectors
+    T_K = table["T_C"].values + 273.15
+    RH_frac = table["RH_mid_pct"].values / 100.0
+    v = table["v_ms"].values
+    d = table["thickness_mm"].values
+    K_data = table["K_eff_1_per_s"].values
+
+    # Log-linear design matrix
+    y = np.log(K_data)
+    X = np.column_stack([
+        np.ones(len(table)),             # beta0 = ln(K_ref)
+        1.0 / T_ref_K - 1.0 / T_K,      # beta1 = Ea/R
+        RH_frac,                          # beta2 = -alpha
+        np.log(v / v_ref),               # beta3 = gamma
+        np.log(d_ref / d),               # beta4 = delta
+    ])
+
+    beta, residuals, rank, sv = np.linalg.lstsq(X, y, rcond=None)
+
+    # Extract physical parameters
+    params = {
+        "K_ref": math.exp(beta[0]),
+        "Ea_over_R": beta[1],
+        "alpha_RH": -beta[2],
+        "gamma_v": beta[3],
+        "delta_d": beta[4],
+        "T_ref_K": T_ref_K,
+        "v_ref": v_ref,
+        "d_ref": d_ref,
+    }
+
+    # Goodness of fit
+    y_pred = X @ beta
+    SS_res = float(np.sum((y - y_pred) ** 2))
+    SS_tot = float(np.sum((y - np.mean(y)) ** 2))
+    R2 = 1.0 - SS_res / SS_tot if SS_tot > 0 else 0.0
+    RMSE_log = math.sqrt(SS_res / len(table))
+    params["R2"] = R2
+    params["RMSE_log"] = RMSE_log
+
+    # Print fit summary
+    print(f"\n{'='*70}")
+    print("PARAMETRIC K_eff MODEL (fitted from all Phase-2 experiments)")
+    print(f"{'='*70}")
+    print(f"  K_ref    = {params['K_ref']:.4e} 1/s  (at T={cfg.T_ref_C}C, RH=0%, v={v_ref}, d={d_ref}mm)")
+    print(f"  Ea/R     = {params['Ea_over_R']:.0f} K")
+    print(f"  alpha_RH = {params['alpha_RH']:.3f}")
+    print(f"  gamma_v  = {params['gamma_v']:.3f}  (K ~ v^gamma)")
+    print(f"  delta_d  = {params['delta_d']:.3f}  (K ~ (d_ref/d)^delta)")
+    print(f"  R2       = {R2:.4f}")
+    print(f"  RMSE(ln K) = {RMSE_log:.4f}")
+    print(f"  n_points = {len(table)}")
+
+    # Per-point comparison
+    print(f"\n  {'T':>4} {'RH%':>5} {'v':>5} {'d':>3} | {'K_data':>10} {'K_fit':>10} {'err%':>7}")
+    print(f"  {'-'*52}")
+    for i in range(len(table)):
+        K_pred = math.exp(y_pred[i])
+        err = (K_pred - K_data[i]) / K_data[i] * 100
+        print(f"  {table.iloc[i]['T_C']:>4.0f} {table.iloc[i]['RH_mid_pct']:>5.1f} "
+              f"{table.iloc[i]['v_ms']:>5.2f} {table.iloc[i]['thickness_mm']:>3.0f} | "
+              f"{K_data[i]:>10.4e} {K_pred:>10.4e} {err:>+7.1f}%")
+    print(f"{'='*70}\n")
+
+    _PARAMETRIC_PARAMS = params
+    return params
 
 
 def _inside_valid_box(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> bool:
@@ -106,92 +239,28 @@ def K_eff_from_T_RH(
 
 
 def keff_from_state(T_in_C: float, RH_in_frac: float, cfg: KineticsConfig) -> float:
-    """Return k_eff using table inside validity box and guardrail outside."""
+    """Return K_eff using parametric model fitted from all Phase-2 experiments.
 
-    row = _nearest_keff_row(T_in_C, RH_in_frac, cfg)
-    if row is not None:
-        base_K = float(row["K_eff_1_per_s"])
-        if base_K <= 0.0:
-            base_K = cfg.K_min_1_per_s
-        T_base_C = float(row["T_C"])
-        RH_base_frac = float(row["RH_mid_pct"]) / 100.0
+    K_eff(T, RH, v, d) = K_ref * exp(Ea/R * (1/T_ref - 1/T))
+                               * exp(-alpha * RH)
+                               * (v/v_ref)^gamma
+                               * (d_ref/d)^delta
+    """
+    if cfg.use_knb_table and cfg.phase2_models_root is not None:
+        params = _fit_parametric_keff(cfg)
+        if params is not None:
+            T_K = T_in_C + 273.15
+            ln_K = (
+                math.log(params["K_ref"])
+                + params["Ea_over_R"] * (1.0 / params["T_ref_K"] - 1.0 / T_K)
+                - params["alpha_RH"] * RH_in_frac
+                + params["gamma_v"] * math.log(cfg.v_ms / params["v_ref"])
+                + params["delta_d"] * math.log(params["d_ref"] / cfg.thickness_mm)
+            )
+            return max(cfg.K_min_1_per_s, math.exp(ln_K))
 
-        if _inside_valid_box(T_in_C, RH_in_frac, cfg):
-            return max(cfg.K_min_1_per_s, base_K)
-
-        K_guard, _ = get_K_eff_from_state(
-            base_K_1_per_s=base_K,
-            T_in_C=T_in_C,
-            RH_in_frac=RH_in_frac,
-            cfg=cfg,
-            T_base_C=T_base_C,
-            RH_base_frac=RH_base_frac,
-        )
-        return max(cfg.K_min_1_per_s, K_guard)
-
+    # Fallback: Arrhenius + RH scaling from config parameters
     return K_eff_from_T_RH(T_in_C, RH_in_frac, cfg)
-
-
-def get_K_eff_from_state(
-    base_K_1_per_s: float,
-    T_in_C: float,
-    RH_in_frac: float,
-    cfg: KineticsConfig,
-    T_base_C: float | None = None,
-    RH_base_frac: float | None = None,
-) -> tuple[float, dict]:
-    """
-    Adjust a base kinetic coefficient using temperature/RH guardrails.
-
-    Returns (K_eff, flags_dict) capturing whether the operating point is inside
-    the strict and soft validity boxes.
-    """
-
-    if T_base_C is None:
-        T_base_C = cfg.T_C_ref
-    if RH_base_frac is None:
-        RH_base_frac = 0.5 * (cfg.RH_lo_pct_ref + cfg.RH_hi_pct_ref) / 100.0
-
-    T_min = cfg.T_min_valid_C
-    T_max = cfg.T_max_valid_C
-    T_soft_min = cfg.T_soft_min_C
-    T_soft_max = cfg.T_soft_max_C
-
-    RH_min = getattr(cfg, "RH_min_valid_frac", cfg.RH_min_valid_pct / 100.0)
-    RH_max = getattr(cfg, "RH_max_valid_frac", cfg.RH_max_valid_pct / 100.0)
-    RH_soft_min = cfg.RH_soft_min_pct / 100.0
-    RH_soft_max = cfg.RH_soft_max_pct / 100.0
-
-    inside_T_box = T_min <= T_in_C <= T_max
-    inside_RH_box = RH_min <= RH_in_frac <= RH_max
-    inside_T_soft = T_soft_min <= T_in_C <= T_soft_max
-    inside_RH_soft = RH_soft_min <= RH_in_frac <= RH_soft_max
-
-    K_eff = base_K_1_per_s
-
-    T_in_K = T_in_C + 273.15
-    T_base_K = T_base_C + 273.15
-    Ea_over_R = cfg.Ea_over_R_K
-    if Ea_over_R is not None and inside_T_soft:
-        K_eff *= math.exp(-Ea_over_R * (1.0 / T_in_K - 1.0 / T_base_K))
-
-    RH_eff = min(max(RH_in_frac, RH_soft_min), RH_soft_max)
-    RH_eff = min(max(RH_eff, RH_min), RH_max)
-    denom = 1.0 - RH_base_frac
-    if denom > 1e-6:
-        scale_RH = (1.0 - RH_eff) / denom
-        scale_RH = min(scale_RH, cfg.max_RH_scale)
-        scale_RH = max(scale_RH, 0.0)
-        K_eff *= scale_RH
-
-    flags = {
-        "inside_T_box": inside_T_box,
-        "inside_RH_box": inside_RH_box,
-        "inside_T_soft": inside_T_soft,
-        "inside_RH_soft": inside_RH_soft,
-    }
-
-    return K_eff, flags
 
 
 def get_knb_table(cfg: KineticsConfig) -> Optional[KNBTable]:
@@ -355,11 +424,16 @@ def compute_dm_w_air_capacity(
     dt_s: float,
     cfg: KineticsConfig,
     h_fg_kJ_per_kg: float,
+    p_atm_Pa: float = 101325.0,
 ) -> float:
     """
     Compute maximum water mass [kg] that the air can take in this step such that
     the outlet RH (after latent-heat-adjusted cooling) does not exceed
     cfg.RH_out_max_frac.
+
+    p_atm_Pa must match the pressure used when computing omega_in (e.g. 86120 Pa
+    at Kathmandu).  Using the wrong pressure here causes the RH back-calculation
+    to return an artificially high value, forcing dm_air_max = 0 at high altitude.
     """
 
     if m_da_kg_per_s <= 0.0 or dt_s <= 0.0:
@@ -370,7 +444,7 @@ def compute_dm_w_air_capacity(
         return float("inf")
 
     h_in = moist_air_enthalpy_kJ_per_kg(T_in_C, omega_in)
-    omega_sat_in = humidity_ratio_from_T_RH(T_in_C, 1.0)
+    omega_sat_in = humidity_ratio_from_T_RH(T_in_C, 1.0, p_atm_Pa)
     domega_hi = max(omega_sat_in - omega_in, cfg.min_domega_drive)
     if domega_hi <= 0:
         return 0.0
@@ -385,7 +459,7 @@ def compute_dm_w_air_capacity(
         # Avoid extreme negative temperatures that can overflow Tetens correlation.
         if T_out_C < -60.0:
             T_out_C = -60.0
-        return RH_from_T_omega(T_out_C, omega_out)
+        return RH_from_T_omega(T_out_C, omega_out, p_atm_Pa)
 
     RH_hi = RH_out_for_domega(domega_hi)
     if RH_hi <= RH_max:

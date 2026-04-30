@@ -33,15 +33,36 @@ from typing import Literal, Optional, List
 
 # Import chamber geometry module removed - single-inlet only
 
+# ==============================================================================
+# LOCATION ELEVATION DATA
+# Standard atmosphere formula: P = 101325 × (1 - 0.0065×h/288.15)^5.2561
+# ==============================================================================
+LOCATION_ELEVATIONS_M: dict = {
+    "kathmandu":  1350,   # Capital city, Bagmati Province
+    "biratnagar":   72,   # Terai lowlands, Koshi Province
+    "taplejung":  1820,   # Eastern hills, Koshi Province
+    "dhulikhel":  1550,   # Kavrepalanchok, near Kathmandu
+}
+
+
+def elevation_to_P_atm_Pa(elevation_m: float) -> float:
+    """Standard atmosphere: elevation [m] → pressure [Pa]."""
+    return 101325.0 * (1.0 - 0.0065 * elevation_m / 288.15) ** 5.2561
+
 
 class DryerConfiguration(str, Enum):
-    """Five dryer configurations to simulate."""
-    
-    CONFIG_A = "A_HP_only"  # Heat pump only, 24/7
-    CONFIG_B = "B_solar_HP_series"  # Solar → HP condenser (series boost)
-    CONFIG_C = "C_solar_HP_evap"  # Solar → HP evaporator (COP boost)
-    CONFIG_D = "D_solar_only"  # Solar only, no HP
-    CONFIG_E = "E_solar_evap_cond_cascade"  # Solar → HP evap → HP cond (your design)
+    """Dryer configurations to simulate."""
+
+    CONFIG_A  = "A_HP_only"                      # Heat pump only, 24/7
+    CONFIG_B  = "B_solar_HP_series"              # Solar → HP condenser (series boost)
+    CONFIG_C1 = "C1_solar_cascade_mix_before"    # Mix before solar: [r×Exh+(1-r)×Amb] → Solar → Evap → Cond
+    CONFIG_C2 = "C2_solar_cascade_mix_after"     # Mix after solar:  Amb → Solar → [Mix+r×Exh] → Evap → Cond
+    CONFIG_D1 = "D1_HRX_exhaust_expelled"        # HRX + HP: preheated amb -> Cond, cooled exh expelled
+    CONFIG_D2 = "D2_HRX_exhaust_to_evap"         # HRX + HP: preheated amb -> Cond, cooled exh -> Evap
+    CONFIG_D3 = "D3_HRX_exhaust_to_cond"         # HRX + HP: cooled exh -> Cond, preheated amb -> Evap
+    CONFIG_E1 = "E1_HRX_solar_evap_ambient"      # HRX + Solar + HP: amb -> HRX -> Solar -> Cond, evap = ambient
+    CONFIG_E2 = "E2_HRX_solar_evap_exhaust_mix"  # HRX + Solar + HP: amb -> HRX -> Solar -> Cond, evap = exh+amb mix
+    CONFIG_E3 = "E3_HRX_solar_on_evap"           # HRX + HP: amb -> HRX -> Cond, exh_cooled+amb -> Solar -> Evap
 
 
 @dataclass
@@ -51,7 +72,11 @@ class AmbientConfig:
     csv_path: Path
     start_index: int = 0
     max_steps: Optional[int] = None
-    
+
+    # Site elevation — used to compute P_atm and air density in __post_init__
+    # Use LOCATION_ELEVATIONS_M dict or pass directly [metres above sea level]
+    elevation_m: float = 0.0
+
     # Column names in CSV
     time_col: str = "datetime"
     temp_col: str = "T_amb_C"
@@ -59,8 +84,8 @@ class AmbientConfig:
     ghi_col: str = "G_hor_Wm2"
     wind_col: Optional[str] = None
     pressure_col: Optional[str] = None
-    
-    # Default values if columns missing
+
+    # Computed from elevation_m in SimulationConfig.__post_init__
     default_pressure_Pa: float = 101325.0
     default_wind_speed_m_per_s: float = 1.0
 
@@ -83,24 +108,34 @@ class SolarConfig:
 class HeatPumpConfig:
     """Heat pump configuration."""
     
-    refrigerant: str = "R134a"
+    refrigerant: str = "R134a"        # Standard heat-pump dryer refrigerant
     eta_isentropic: float = 0.75
     eta_mechanical: float = 0.95
     superheat_K: float = 5.0
     subcooling_K: float = 5.0
     epsilon_evap: float = 0.85
     epsilon_cond: float = 0.85
-    T_evap_min_C: float = -15.0
+    # R134a limits: T_evap_min=-5°C (anti-frost), T_cond_max=70°C (critical=101°C)
+    T_evap_min_C: float = -5.0
     T_evap_max_C: float = 20.0
     T_cond_min_C: float = 30.0
     T_cond_max_C: float = 70.0
     COP_min: float = 2.0
-    pressure_ratio_max: float = 8.0
+    pressure_ratio_max: float = 10.0
     T_approach_evap_K: float = 10.0
     T_approach_cond_K: float = 10.0
+    # Fixed evaporator saturation temperature for closed-loop HPCD [°C]
+    # Real AC units run at ~5°C; coil surface = T_evap_target + DT_evap_approach
+    T_evap_target_C: float = 5.0
     allow_modulation: bool = True
     modulation_min_pct: float = 30.0
     enabled: bool = True
+    # 1-ton AC reference thresholds [kW] — flags only, no capping
+    Q_cond_max_kW: float = 4.0
+    Q_evap_max_kW: float = 3.5
+    # Evaporator coil approach temperature [K]
+    # Coil surface = T_evap_sat + DT_evap_approach (refrigerant-to-surface resistance)
+    DT_evap_approach: float = 3.0
 
 
 @dataclass
@@ -147,28 +182,29 @@ class DryerConfig:
         m_da:           1.1 × 1.1 × 0.098 = 0.119 kg/s = 428 kg/h
     """
     
-    # Target conditions
-    T_set_C: float = 50.0
+    # Target conditions — 45°C: safer for AC (R410A P_cond=31bar vs cutout 42-45bar)
+    T_set_C: float = 45.0
     T_set_tolerance_C: float = 2.0
-    
+
     # =========================================================================
     # PRODUCT PARAMETERS (KEY VARIABLES YOU CAN CHANGE)
     # =========================================================================
     X0_db: float = 6.5           # Initial moisture [kg water/kg dry]
     X_final_db: float = 0.10     # Target final moisture [kg water/kg dry]
     X_eq_db: float = 0.0         # Equilibrium moisture (use 0 per your request)
-    m_p_dry_kg: float = 10.0     # Dry mass [kg] → 75 kg fresh at X0=6.5
-    
+    # m_p_dry_kg = 3.0 → ~22.5 kg fresh; Q_cond_req ≈ 4.0 kW (matches 1-ton AC)
+    m_p_dry_kg: float = 3.0      # Dry mass [kg]
+
     # Product properties
     product_thickness_m: float = 0.006  # 6 mm apple slices
     product_apparent_density_kg_per_m3: float = 600.0
-    
+
     # =========================================================================
     # TRAY CONFIGURATION
     # =========================================================================
     n_trays: int = 10
     max_trays: int = 10
-    loading_density_kg_m2: float = 5.0   # kg fresh per m² (NEW - explicit)
+    loading_density_kg_m2: float = 0.0   # 0 = auto-calculate from rho_bulk × thickness
     
     # =========================================================================
     # GEOMETRY PARAMETERS (NEW - for proper air flow calculation)
@@ -177,7 +213,7 @@ class DryerConfig:
     tray_length_m: float = 0.0           # Auto-calculated if 0
     tray_width_m: float = 0.0            # Auto-calculated if 0
     tray_area_m2: Optional[float] = None # Horizontal area per tray
-    air_gap_m: float = 0.08              # 8 cm gap between trays
+    air_gap_m: float = 0.12              # 12 cm gap between trays
     tray_frame_m: float = 0.02           # 2 cm tray frame thickness
     
     # Chamber dimensions (calculated)
@@ -191,20 +227,85 @@ class DryerConfig:
     # Air flow rate: if 0, calculated from target_velocity
     m_da_kg_per_s: float = 0.0           # Auto-calculated from velocity
     target_velocity_m_s: float = 1.1     # Target air velocity [m/s]
-    air_density_kg_per_m3: float = 1.1   # At ~50°C
+    # air_density_kg_per_m3 = 0.0 → computed in __post_init__ from P_atm and T_set_C
+    # Formula: rho = P_atm / (287.05 × (T_set + 273.15))
+    # Examples at T_set=45°C: Biratnagar≈1.100, Kathmandu≈0.937, Taplejung≈0.891 kg/m³
+    air_density_kg_per_m3: float = 0.0   # 0 = auto-compute from elevation+T_set
     
     # Convenience (for backward compatibility)
     tray_depth_m: float = 0.05
     
-    # Thermodynamic
-    h_fg_kJ_per_kg: float = 2400.0
+    # Thermodynamic — latent heat at T_set = 45 degC (IAPWS-IF97)
+    h_fg_kJ_per_kg: float = 2394.8
     
     # Timestep
     dt_s: float = 60.0
     
-    # Recirculation (DISABLED per user request)
+    # Recirculation — fixed fraction only (dynamic modes removed 2026-04-20)
     r_recirc: float = 0.0
-    
+
+    # Section discretization
+    n_sections: int = 1                  # Sections per tray along airflow [1=legacy]
+
+    # Flow reversal
+    flow_reversal_interval_min: float = 0.0  # 0=disabled; e.g. 30.0 = reverse every 30 min
+
+    # Condenser-direct bypass: VPD-based oscillating strategy.
+    # When cond_penalty_frac < this threshold, exhaust routes directly to condenser
+    # (closed loop, tiny Q_cond) and evaporator runs on ambient air (heat source only).
+    # When humidity builds and cond_penalty_frac > 3× threshold, switch back to evap.
+    # Set to 0.0 to disable (default). Typical value: 0.05 (5%).
+    # cond_penalty = (VPD_post_evap - VPD_exhaust) / VPD_post_evap
+    cond_penalty_thresh: float = 0.0
+
+    # =========================================================================
+    # ADAPTIVE EVAPORATOR TEMPERATURE (closed-loop r > 0 only)
+    # =========================================================================
+    # Strategy for setting T_evap when recirculating:
+    #   "fixed"          — use T_evap_target_C (default, standard dehumidifier)
+    #   "onset-tracking" — set T_evap relative to the onset temperature where
+    #                      evaporator outlet just reaches the mixed-air dew point.
+    #                      Subcooling below onset varies with MR (drying phase).
+    evap_strategy: str = "fixed"
+    # Subcooling below onset [K] for onset-tracking, by drying phase:
+    evap_onset_delta_early_K: float = 2.0   # MR > 0.5
+    evap_onset_delta_mid_K: float = 3.0     # 0.2 < MR <= 0.5
+    evap_onset_delta_late_K: float = 5.0    # MR <= 0.2
+
+    # =========================================================================
+    # HEAT RECOVERY EXCHANGER (Config D1/D2/D3)
+    # =========================================================================
+    eps_HRX: float = 0.70               # HRX effectiveness [-]
+    d_variant: str = ""                  # "D1", "D2", "D3", "E1", "E2", or "E3" (set by factory)
+    evap_ambient_mixing: bool = False    # D2: mix ambient with cooled exhaust at evap
+    # VPD-based exhaust bypass for open-loop D/E configs.
+    # When VPD utilization (drying%) < this threshold, route warm exhaust
+    # directly to condenser (tiny Q_cond) instead of HRX+ambient path.
+    # Set to 0.0 to disable (default). Typical value: 0.05 (5%).
+    vpd_bypass_thresh: float = 0.0
+
+    # =========================================================================
+    # STREAM 2: Evaporator source air circuit (Config C1/C2)
+    # =========================================================================
+    # A separate air blower passes solar-heated air over the HP evaporator
+    # coil. This mass flow determines how much the source air cools before
+    # reaching the refrigerant — directly setting T_evap_C and COP.
+    #   0.0 = legacy mode (infinite flow assumed, T_evap_source = T_solar_out)
+    #   >0  = finite flow: T_evap_source = T_solar_out - Q_evap/(m*cp)
+    m_evap_stream_kg_per_s: float = 0.0   # Stream 2 blower mass flow [kg/s]
+    dP_evap_stream_Pa: float = 80.0       # Stream 2 evap coil pressure drop [Pa]
+
+    # =========================================================================
+    # FAN & PRESSURE DROP PARAMETERS
+    # =========================================================================
+    eta_fan: float = 0.60                # Fan total efficiency [-]
+    dP_evap_Pa: float = 80.0            # Evaporator coil air-side ΔP [Pa]
+    dP_cond_Pa: float = 80.0            # Condenser coil air-side ΔP [Pa]
+    dP_duct_Pa: float = 50.0            # Ductwork ΔP [Pa]
+    K_bend: float = 2.0                 # 180-degree serpentine turn loss coeff [-]
+    wall_roughness_m: float = 0.0       # Wall roughness [m]; 0 = smooth
+    mu_air_Pa_s: float = 2.0e-5         # Air dynamic viscosity at ~50°C [Pa·s]
+
     # =========================================================================
     # MULTI-ZONE CONFIGURATION (DISABLED - single-inlet only)
     # =========================================================================
@@ -237,10 +338,10 @@ class DryerConfig:
     def get_cross_section_m2(self) -> float:
         """Calculate air flow cross-sectional area.
 
-        For through-flow design (air enters top, flows through each tray):
-        Cross-section = tray area
+        For cross-flow design (air flows horizontally across tray surface):
+        Cross-section = tray_width x air_gap
         """
-        return self.tray_area_m2
+        return self.tray_width_m * self.air_gap_m
 
 
 @dataclass
@@ -254,9 +355,10 @@ class KineticsConfig:
     use_knb_table: bool = True  # Use pre-computed k,n,b table (fallback mode)
     knb_csv_path: Optional[Path] = None
 
-    # Reference conditions
-    T_ref_C: float = 50.0
-    T_C_ref: float = 50.0  # Alias for T_ref_C
+    # Reference conditions — updated to match new T_set_C = 45°C
+    T_ref_C: float = 45.0
+    T_C_ref: float = 45.0  # Alias for T_ref_C
+    T_ref_arrhenius_C: float = 45.0  # Arrhenius scaling reference temperature
     v_ref_m_per_s: float = 1.1
     v_ms_ref: float = 1.1  # Alias for v_ref_m_per_s
     v_ms: float = 1.1
@@ -275,9 +377,9 @@ class KineticsConfig:
     K_ref_1_per_s: float = 1e-4  # 0.0001
     K_min_1_per_s: float = 1e-6
     alpha_T_per_C: float = 0.05
-    alpha_RH: float = 2.0
+    alpha_RH: float = 1.75  # matches parametric OLS fit of phase2c_for_chamber.csv (R2=0.898)
 
-    # Valid ranges (hard limits)
+    # Valid ranges (hard limits) — expanded upper bound to 70°C for generality
     T_min_valid_C: float = 30.0
     T_max_valid_C: float = 70.0
     RH_min_valid_frac: float = 0.1
@@ -294,7 +396,6 @@ class KineticsConfig:
     # Extrapolation parameters
     use_arrhenius_extrapolation: bool = True
     E_a_kJ_per_mol: float = 30.0
-    Ea_over_R_K: float = 3609.0  # E_a / R where R = 8.314 J/(mol·K)
     T_ref_arrhenius_C: float = 50.0
     max_RH_scale: float = 2.0
 
@@ -309,7 +410,7 @@ class KineticsConfig:
     # Limits
     k_eff_min: float = 1e-6
     k_eff_max: float = 0.1
-    RH_out_max_frac: float = 0.95
+    RH_out_max_frac: float = 1.0
     min_domega_drive: float = 1e-4
     enable_air_limit: bool = True  # MUST be enabled for correct temperature profiles
     debug_keff: bool = False  # Disable verbose logging
@@ -357,23 +458,38 @@ class SimulationConfig:
         elif self.config_type == DryerConfiguration.CONFIG_B:
             self.solar.enabled = True
             self.heatpump.enabled = True
-        elif self.config_type == DryerConfiguration.CONFIG_C:
+        elif self.config_type == DryerConfiguration.CONFIG_C1:
             self.solar.enabled = True
             self.heatpump.enabled = True
-        elif self.config_type == DryerConfiguration.CONFIG_D:
-            self.solar.enabled = True
-            self.heatpump.enabled = False
-        elif self.config_type == DryerConfiguration.CONFIG_E:
+        elif self.config_type == DryerConfiguration.CONFIG_C2:
             self.solar.enabled = True
             self.heatpump.enabled = True
-        
-        # Always disable recirculation
-        self.dryer.r_recirc = 0.0
+        elif self.config_type in (DryerConfiguration.CONFIG_D1,
+                                  DryerConfiguration.CONFIG_D2,
+                                  DryerConfiguration.CONFIG_D3):
+            self.solar.enabled = False
+            self.heatpump.enabled = True
         
         # Set reference parameters for kinetics
         self.kinetics.X0_db_ref = self.dryer.X0_db
         self.kinetics.X_eq_db_ref = self.dryer.X_eq_db
-        
+
+        # =====================================================================
+        # COMPUTE P_ATM FROM ELEVATION (must be before geometry calculation)
+        # =====================================================================
+        self.ambient.default_pressure_Pa = elevation_to_P_atm_Pa(self.ambient.elevation_m)
+
+        # =====================================================================
+        # COMPUTE AIR DENSITY FROM P_ATM AND T_SET (must be before geometry)
+        # rho = P_atm / (R_da × T_abs)  where R_da = 287.05 J/(kg·K)
+        # =====================================================================
+        if self.dryer.air_density_kg_per_m3 <= 0:
+            R_da = 287.05
+            self.dryer.air_density_kg_per_m3 = (
+                self.ambient.default_pressure_Pa
+                / (R_da * (self.dryer.T_set_C + 273.15))
+            )
+
         # =====================================================================
         # CALCULATE CHAMBER GEOMETRY
         # =====================================================================
@@ -403,28 +519,33 @@ class SimulationConfig:
         """
         
         dryer = self.dryer
-        
-        # Dry mass per tray
-        m_p_tray = dryer.m_p_dry_kg / dryer.n_trays
 
-        # Tray area from product properties (through-flow design)
-        # This matches the validated setup_simulation() formula
-        rho_bulk = dryer.product_apparent_density_kg_per_m3
-        thickness = dryer.product_thickness_m
-        tray_area = m_p_tray / (rho_bulk * thickness)
+        # Auto-calculate loading density from product properties if not set
+        if dryer.loading_density_kg_m2 <= 0:
+            dryer.loading_density_kg_m2 = (
+                dryer.product_apparent_density_kg_per_m3 * dryer.product_thickness_m
+            )
+
+        # Fresh mass per tray (what's actually loaded at start)
+        m_p_tray = dryer.m_p_dry_kg / dryer.n_trays
+        m_fresh_tray = m_p_tray * (1 + dryer.X0_db)
+
+        # Tray area from loading density [kg fresh / m²]
+        tray_area = m_fresh_tray / dryer.loading_density_kg_m2
         tray_side = tray_area ** 0.5
-        
+
         # Set tray dimensions
         dryer.tray_length_m = tray_side
         dryer.tray_width_m = tray_side
         dryer.tray_area_m2 = tray_area
-        
-        # Air mass flow rate: use tray area as flow cross-section
-        # (through-flow design: air passes vertically through product bed)
+
+        # Cross-flow: air flows horizontally through gap between trays
+        # A_cross = tray_width × air_gap (NOT tray_area)
         if dryer.m_da_kg_per_s <= 0:
+            A_cross = dryer.tray_width_m * dryer.air_gap_m
             dryer.m_da_kg_per_s = (
                 dryer.air_density_kg_per_m3 *
-                dryer.tray_area_m2 *
+                A_cross *
                 dryer.target_velocity_m_s
             )
         
@@ -436,6 +557,100 @@ class SimulationConfig:
         dryer.chamber_length_m = dryer.tray_length_m + 0.20
         dryer.chamber_width_m = dryer.tray_width_m + 0.20
     
+    def compute_pressure_drop_and_fan_power(self) -> dict:
+        """Compute air-side pressure drop and fan power.
+
+        Returns dict with all intermediate values for display/debugging.
+
+        Physics:
+            Channel friction: Darcy-Weisbach with Haaland friction factor
+                Ref: Incropera & DeWitt Ch. 8; Haaland (1983) J. Fluids Eng. 105(1)
+            Bend losses: K_bend × (ρv²/2) per 180° serpentine turn
+                Ref: Idelchik, "Handbook of Hydraulic Resistance" 3rd ed, Section 6
+            HX losses: parametric ΔP for condenser/evaporator coils
+                Ref: ASHRAE Fundamentals
+            Fan power: W_fan = V_dot × ΔP_total / η_fan
+                Ref: ASHRAE Fundamentals Ch. 21
+        """
+        import math
+
+        d = self.dryer
+        W = d.tray_width_m      # channel width [m]
+        h = d.air_gap_m         # channel height (air gap) [m]
+        L = d.tray_length_m     # channel length (= tray length for cross-flow) [m]
+        rho = d.air_density_kg_per_m3
+        v = d.target_velocity_m_s
+        mu = d.mu_air_Pa_s
+        eps = d.wall_roughness_m
+        n_trays = d.n_trays
+
+        # --- Dynamic pressure ---
+        q = 0.5 * rho * v**2  # [Pa]
+
+        # --- Hydraulic diameter (rectangular channel) ---
+        D_h = 2.0 * W * h / (W + h)
+
+        # --- Reynolds number ---
+        Re = rho * v * D_h / mu
+
+        # --- Darcy friction factor ---
+        if Re < 1:
+            f = 0.0
+        elif Re < 2300:
+            # Laminar: f = 64 / Re
+            f = 64.0 / Re
+        else:
+            # Turbulent: Haaland explicit approximation (1983)
+            # 1/√f = -1.8 log10[(ε/D_h/3.7)^1.11 + 6.9/Re]
+            term = (eps / D_h / 3.7)**1.11 + 6.9 / Re
+            f = 1.0 / (-1.8 * math.log10(term))**2
+
+        # --- Channel friction ΔP (per gap, then total) ---
+        dP_per_gap = f * (L / D_h) * q if D_h > 0 else 0.0
+        dP_channels = dP_per_gap * n_trays
+
+        # --- Bend losses (n_trays - 1 serpentine turns) ---
+        n_bends = max(0, n_trays - 1)
+        dP_per_bend = d.K_bend * q
+        dP_bends = dP_per_bend * n_bends
+
+        # --- HX pressure drops ---
+        dP_cond = d.dP_cond_Pa if self.heatpump.enabled else 0.0
+        # Evaporator in air path only when r_recirc > 0 (closed-loop) or D2/D3
+        dP_evap = d.dP_evap_Pa if (d.r_recirc > 0 or d.d_variant in ("D2", "D3")) else 0.0
+        # HRX adds ~50 Pa for plate heat exchanger
+        dP_HRX = 50.0 if d.d_variant in ("D1", "D2", "D3") else 0.0
+
+        # --- Ductwork ---
+        dP_duct = d.dP_duct_Pa
+
+        # --- Total ---
+        dP_total = dP_channels + dP_bends + dP_cond + dP_evap + dP_HRX + dP_duct
+
+        # --- Fan power ---
+        V_dot = d.m_da_kg_per_s / rho if rho > 0 else 0.0  # [m³/s]
+        W_fan_W = V_dot * dP_total / d.eta_fan if d.eta_fan > 0 else 0.0
+        W_fan_kW = W_fan_W / 1000.0
+
+        return {
+            "D_h_m": D_h,
+            "Re": Re,
+            "f": f,
+            "q_Pa": q,
+            "dP_per_gap_Pa": dP_per_gap,
+            "dP_channels_Pa": dP_channels,
+            "n_bends": n_bends,
+            "dP_per_bend_Pa": dP_per_bend,
+            "dP_bends_Pa": dP_bends,
+            "dP_cond_Pa": dP_cond,
+            "dP_evap_Pa": dP_evap,
+            "dP_duct_Pa": dP_duct,
+            "dP_total_Pa": dP_total,
+            "V_dot_m3_per_s": V_dot,
+            "W_fan_W": W_fan_W,
+            "W_fan_kW": W_fan_kW,
+        }
+
     # def _setup_multizone(self):
     #     """Setup multi-zone configuration - DISABLED."""
     #     pass
@@ -446,12 +661,15 @@ class SimulationConfig:
         dryer = self.dryer
         m_fresh = dryer.m_p_dry_kg * (1 + dryer.X0_db)
         m_water = dryer.m_p_dry_kg * (dryer.X0_db - dryer.X_final_db)
-        # Through-flow: air flows through tray area
-        A_cross = dryer.tray_area_m2
+        # Cross-flow: air flows through gap between trays
+        A_cross = dryer.tray_width_m * dryer.air_gap_m
         v_actual = dryer.m_da_kg_per_s / (dryer.air_density_kg_per_m3 * A_cross)
         
         print("\n" + "="*70)
         print(f"CHAMBER GEOMETRY - {self.config_type.value}")
+        print(f"  Location: elevation={self.ambient.elevation_m:.0f}m, "
+              f"P_atm={self.ambient.default_pressure_Pa/1000:.2f}kPa, "
+              f"rho_air={dryer.air_density_kg_per_m3:.3f}kg/m³")
         print("="*70)
         
         print(f"""
@@ -463,9 +681,9 @@ PRODUCT:
 
 TRAYS:
   Number of trays:           {dryer.n_trays}
-  Tray dimensions:           {dryer.tray_length_m*100:.1f} × {dryer.tray_width_m*100:.1f} cm
-  Tray area (each):          {dryer.tray_area_m2:.3f} m²
-  Loading density:           {dryer.loading_density_kg_m2:.1f} kg/m²
+  Tray dimensions:           {dryer.tray_length_m*100:.1f} x {dryer.tray_width_m*100:.1f} cm
+  Tray area (each):          {dryer.tray_area_m2:.3f} m2
+  Loading (fresh/tray):      {m_fresh/dryer.n_trays/dryer.tray_area_m2:.1f} kg/m2 (actual)
   Air gap:                   {dryer.air_gap_m*100:.1f} cm
 
 CHAMBER:
@@ -477,14 +695,40 @@ AIR FLOW:
   Mass flow rate:            {dryer.m_da_kg_per_s:.4f} kg/s = {dryer.m_da_kg_per_s*3600:.1f} kg/h
   Target velocity:           {dryer.target_velocity_m_s:.2f} m/s
   Actual velocity:           {v_actual:.2f} m/s
-  Cross-section area:        {A_cross:.4f} m²
+  Cross-section area:        {A_cross:.4f} m2
 """)
+        if dryer.n_sections > 1:
+            print(f"SECTION DISCRETIZATION:")
+            print(f"  Sections per tray:         {dryer.n_sections}")
+            print(f"  Total nodes:               {dryer.n_trays * dryer.n_sections}")
+            print()
+        if dryer.flow_reversal_interval_min > 0:
+            print(f"FLOW REVERSAL:")
+            print(f"  Reversal interval:         {dryer.flow_reversal_interval_min:.0f} min")
+            print()
         
-        # Zone information - single-inlet only
-        print("ZONES (Single-Inlet):")
-        print(f"  Number of inlets:          1")
-        print(f"  Number of outlets:         1")
-        
+        # Pressure drop breakdown
+        pd_info = self.compute_pressure_drop_and_fan_power()
+        flow_regime = "laminar" if pd_info["Re"] < 2300 else "turbulent"
+        print(f"""PRESSURE DROP BREAKDOWN:
+  Hydraulic diameter D_h:    {pd_info['D_h_m']*1000:.1f} mm
+  Reynolds number Re:        {pd_info['Re']:.0f} ({flow_regime})
+  Darcy friction factor f:   {pd_info['f']:.4f}
+  Dynamic pressure q:        {pd_info['q_Pa']:.3f} Pa
+
+  Channels ({dryer.n_trays} gaps):       {pd_info['dP_per_gap_Pa']:.3f} Pa/gap x {dryer.n_trays} = {pd_info['dP_channels_Pa']:.1f} Pa
+  Bends ({pd_info['n_bends']} turns):          {pd_info['dP_per_bend_Pa']:.2f} Pa/bend x {pd_info['n_bends']} = {pd_info['dP_bends_Pa']:.1f} Pa
+  Condenser coil:            {pd_info['dP_cond_Pa']:.0f} Pa
+  Evaporator coil:           {pd_info['dP_evap_Pa']:.0f} Pa {'(r_recirc > 0)' if dryer.r_recirc > 0 else '(not in air path)'}
+  Ductwork:                  {pd_info['dP_duct_Pa']:.0f} Pa
+  ----------------------------------------
+  TOTAL dP:                  {pd_info['dP_total_Pa']:.1f} Pa
+
+FAN:
+  Volume flow rate:          {pd_info['V_dot_m3_per_s']:.4f} m3/s
+  Fan efficiency:            {dryer.eta_fan*100:.0f}%
+  Fan power:                 {pd_info['W_fan_W']:.1f} W = {pd_info['W_fan_kW']:.4f} kW
+""")
         print("="*70 + "\n")
 
 
@@ -498,9 +742,8 @@ class ParametricSweepConfig:
     configs_to_run: list[DryerConfiguration] = field(default_factory=lambda: [
         DryerConfiguration.CONFIG_A,
         DryerConfiguration.CONFIG_B,
-        DryerConfiguration.CONFIG_C,
-        DryerConfiguration.CONFIG_D,
-        DryerConfiguration.CONFIG_E,
+        DryerConfiguration.CONFIG_C1,
+        DryerConfiguration.CONFIG_C2,
     ])
     n_parallel_jobs: int = 1
     output_root: Path = Path("outputs/parametric_sweep")
@@ -512,12 +755,18 @@ class ParametricSweepConfig:
 
 def make_config_A_HP_only(
     ambient_csv: Path,
-    T_set_C: float = 50.0,
+    T_set_C: float = 45.0,
     phase2_root: Optional[Path] = None,
-    m_p_dry_kg: float = 10.0,
+    m_p_dry_kg: float = 3.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
+    r_recirc: float = 0.0,
+    n_sections: int = 1,
+    flow_reversal_interval_min: float = 0.0,
+    elevation_m: float = 0.0,
     display_geometry: bool = True,
+    cond_penalty_thresh: float = 0.0,
+    evap_strategy: str = 'fixed',
 ) -> SimulationConfig:
     """Create Config A (HP-only, 24/7 baseline).
 
@@ -528,17 +777,25 @@ def make_config_A_HP_only(
         m_p_dry_kg: Dry mass of product [kg]
         n_trays: Number of trays
         target_velocity: Target air velocity [m/s]
+        r_recirc: Recirculation ratio [0..1]. 0=open-loop, 1=fully closed.
+        n_sections: Sections per tray along airflow [1=legacy]
+        flow_reversal_interval_min: Flow reversal interval [min]. 0=disabled.
         display_geometry: Display geometry on creation
     """
 
     cfg = SimulationConfig(
         config_type=DryerConfiguration.CONFIG_A,
-        ambient=AmbientConfig(csv_path=ambient_csv),
+        ambient=AmbientConfig(csv_path=ambient_csv, elevation_m=elevation_m),
         dryer=DryerConfig(
             T_set_C=T_set_C,
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
+            r_recirc=r_recirc,
+            n_sections=n_sections,
+            flow_reversal_interval_min=flow_reversal_interval_min,
+            cond_penalty_thresh=cond_penalty_thresh,
+            evap_strategy=evap_strategy,
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
@@ -550,24 +807,40 @@ def make_config_A_HP_only(
 def make_config_B_solar_HP_series(
     ambient_csv: Path,
     solar_area_m2: float,
-    T_set_C: float = 50.0,
+    T_set_C: float = 45.0,
     phase2_root: Optional[Path] = None,
-    m_p_dry_kg: float = 10.0,
+    m_p_dry_kg: float = 3.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
+    r_recirc: float = 0.0,
+    n_sections: int = 1,
+    flow_reversal_interval_min: float = 0.0,
+    elevation_m: float = 0.0,
     display_geometry: bool = True,
+    cond_penalty_thresh: float = 0.0,
 ) -> SimulationConfig:
-    """Create Config B (Solar → HP condenser series)."""
+    """Create Config B (Solar → HP condenser series).
+
+    Parameters:
+        r_recirc: Recirculation ratio [0..1]. 0=open-loop, >0=closed-loop
+                  with evaporator dehumidification before solar preheating.
+        n_sections: Sections per tray along airflow [1=legacy]
+        flow_reversal_interval_min: Flow reversal interval [min]. 0=disabled.
+    """
 
     cfg = SimulationConfig(
         config_type=DryerConfiguration.CONFIG_B,
-        ambient=AmbientConfig(csv_path=ambient_csv),
+        ambient=AmbientConfig(csv_path=ambient_csv, elevation_m=elevation_m),
         solar=SolarConfig(area_m2=solar_area_m2),
         dryer=DryerConfig(
             T_set_C=T_set_C,
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
+            r_recirc=r_recirc,
+            n_sections=n_sections,
+            flow_reversal_interval_min=flow_reversal_interval_min,
+            cond_penalty_thresh=cond_penalty_thresh,
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
@@ -576,27 +849,47 @@ def make_config_B_solar_HP_series(
     return cfg
 
 
-def make_config_C_solar_HP_evap(
+def make_config_C1_solar_cascade_mix_before(
     ambient_csv: Path,
     solar_area_m2: float,
-    T_set_C: float = 50.0,
+    T_set_C: float = 45.0,
     phase2_root: Optional[Path] = None,
-    m_p_dry_kg: float = 10.0,
+    m_p_dry_kg: float = 3.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
+    n_sections: int = 1,
+    flow_reversal_interval_min: float = 0.0,
+    r_recirc: float = 0.0,
+    elevation_m: float = 0.0,
+    cond_penalty_thresh: float = 0.0,
     display_geometry: bool = True,
 ) -> SimulationConfig:
-    """Create Config C (Solar-assisted HP evaporator)."""
+    """Create Config C1: Solar cascade — mix BEFORE solar.
+
+    Air path: [r×Exhaust + (1-r)×Ambient] → Solar → Evap → Cond → Chamber
+
+    Parameters
+    ----------
+    r_recirc : float
+        Recirculation ratio [0..1].  Exhaust mixes with ambient BEFORE the
+        solar collector (warmer inlet → lower η_solar but pre-heated air).
+    cond_penalty_thresh : float
+        VPD condenser-direct bypass threshold (0=disabled, typical 0.05).
+    """
 
     cfg = SimulationConfig(
-        config_type=DryerConfiguration.CONFIG_C,
-        ambient=AmbientConfig(csv_path=ambient_csv),
+        config_type=DryerConfiguration.CONFIG_C1,
+        ambient=AmbientConfig(csv_path=ambient_csv, elevation_m=elevation_m),
         solar=SolarConfig(area_m2=solar_area_m2),
         dryer=DryerConfig(
             T_set_C=T_set_C,
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
+            n_sections=n_sections,
+            flow_reversal_interval_min=flow_reversal_interval_min,
+            r_recirc=r_recirc,
+            cond_penalty_thresh=cond_penalty_thresh,
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
@@ -605,26 +898,47 @@ def make_config_C_solar_HP_evap(
     return cfg
 
 
-def make_config_D_solar_only(
+def make_config_C2_solar_cascade_mix_after(
     ambient_csv: Path,
     solar_area_m2: float,
+    T_set_C: float = 45.0,
     phase2_root: Optional[Path] = None,
-    m_p_dry_kg: float = 10.0,
+    m_p_dry_kg: float = 3.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
+    n_sections: int = 1,
+    flow_reversal_interval_min: float = 0.0,
+    r_recirc: float = 0.0,
+    elevation_m: float = 0.0,
+    cond_penalty_thresh: float = 0.0,
     display_geometry: bool = True,
 ) -> SimulationConfig:
-    """Create Config D (Solar-only, no HP)."""
+    """Create Config C2: Solar cascade — mix AFTER solar.
+
+    Air path: Ambient → Solar → [Mix + r×Exhaust] → Evap → Cond → Chamber
+
+    Parameters
+    ----------
+    r_recirc : float
+        Recirculation ratio [0..1].  Exhaust mixes with solar outlet
+        AFTER the solar collector (preserves collector efficiency).
+    cond_penalty_thresh : float
+        VPD condenser-direct bypass threshold (0=disabled, typical 0.05).
+    """
 
     cfg = SimulationConfig(
-        config_type=DryerConfiguration.CONFIG_D,
-        ambient=AmbientConfig(csv_path=ambient_csv),
+        config_type=DryerConfiguration.CONFIG_C2,
+        ambient=AmbientConfig(csv_path=ambient_csv, elevation_m=elevation_m),
         solar=SolarConfig(area_m2=solar_area_m2),
         dryer=DryerConfig(
-            T_set_C=50.0,
+            T_set_C=T_set_C,
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
+            n_sections=n_sections,
+            flow_reversal_interval_min=flow_reversal_interval_min,
+            r_recirc=r_recirc,
+            cond_penalty_thresh=cond_penalty_thresh,
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
@@ -633,27 +947,108 @@ def make_config_D_solar_only(
     return cfg
 
 
-def make_config_E_solar_evap_cond_cascade(
+def make_config_D_HRX(
     ambient_csv: Path,
-    solar_area_m2: float,
-    T_set_C: float = 50.0,
+    d_variant: str = "D1",
+    T_set_C: float = 45.0,
     phase2_root: Optional[Path] = None,
-    m_p_dry_kg: float = 10.0,
+    m_p_dry_kg: float = 3.0,
     n_trays: int = 10,
     target_velocity: float = 1.1,
+    eps_HRX: float = 0.70,
+    evap_ambient_mixing: bool = False,
+    elevation_m: float = 0.0,
     display_geometry: bool = True,
+    vpd_bypass_thresh: float = 0.0,
 ) -> SimulationConfig:
-    """Create Config E (Solar → HP evap → HP cond cascade)."""
+    """Create Config D (HRX + HP, r=0 only).
+
+    Parameters
+    ----------
+    d_variant : str
+        "D1" — preheated amb -> Cond, cooled exh expelled, evap = separate ambient
+        "D2" — preheated amb -> Cond, cooled exh -> Evap
+        "D3" — cooled exh -> Cond, preheated amb -> Evap (swapped routing)
+    eps_HRX : float
+        HRX effectiveness [0..1]. Default 0.70.
+    vpd_bypass_thresh : float
+        VPD utilization threshold for exhaust bypass (0.0 = disabled).
+    """
+    variant_map = {"D1": DryerConfiguration.CONFIG_D1,
+                   "D2": DryerConfiguration.CONFIG_D2,
+                   "D3": DryerConfiguration.CONFIG_D3}
+    if d_variant not in variant_map:
+        raise ValueError(f"d_variant must be D1, D2, or D3, got {d_variant!r}")
 
     cfg = SimulationConfig(
-        config_type=DryerConfiguration.CONFIG_E,
-        ambient=AmbientConfig(csv_path=ambient_csv),
+        config_type=variant_map[d_variant],
+        ambient=AmbientConfig(csv_path=ambient_csv, elevation_m=elevation_m),
+        dryer=DryerConfig(
+            T_set_C=T_set_C,
+            m_p_dry_kg=m_p_dry_kg,
+            n_trays=n_trays,
+            target_velocity_m_s=target_velocity,
+            r_recirc=0.0,  # D configs are r=0 only
+            eps_HRX=eps_HRX,
+            d_variant=d_variant,
+            evap_ambient_mixing=evap_ambient_mixing,
+            vpd_bypass_thresh=vpd_bypass_thresh,
+        ),
+        kinetics=KineticsConfig(phase2_models_root=phase2_root),
+        display_geometry=display_geometry,
+    )
+
+    return cfg
+
+
+def make_config_E_HRX_solar(
+    ambient_csv: Path,
+    solar_area_m2: float,
+    e_variant: str = "E1",
+    T_set_C: float = 45.0,
+    phase2_root: Optional[Path] = None,
+    m_p_dry_kg: float = 3.0,
+    n_trays: int = 10,
+    target_velocity: float = 1.1,
+    eps_HRX: float = 0.70,
+    elevation_m: float = 0.0,
+    display_geometry: bool = True,
+    vpd_bypass_thresh: float = 0.0,
+) -> SimulationConfig:
+    """Create Config E (HRX + Solar + HP, r=0 only).
+
+    Parameters
+    ----------
+    solar_area_m2 : float
+        Solar collector area [m2].
+    e_variant : str
+        "E1" — evaporator on separate ambient (like D1)
+        "E2" — evaporator on mixed cooled exhaust + ambient (like D2)
+        "E3" — solar on evaporator stream (amb->HRX->Cond, exh+amb->Solar->Evap)
+    eps_HRX : float
+        HRX effectiveness [0..1]. Default 0.70.
+    vpd_bypass_thresh : float
+        VPD utilization threshold for exhaust bypass (0.0 = disabled).
+    """
+    variant_map = {"E1": DryerConfiguration.CONFIG_E1,
+                   "E2": DryerConfiguration.CONFIG_E2,
+                   "E3": DryerConfiguration.CONFIG_E3}
+    if e_variant not in variant_map:
+        raise ValueError(f"e_variant must be E1, E2, or E3, got {e_variant!r}")
+
+    cfg = SimulationConfig(
+        config_type=variant_map[e_variant],
+        ambient=AmbientConfig(csv_path=ambient_csv, elevation_m=elevation_m),
         solar=SolarConfig(area_m2=solar_area_m2),
         dryer=DryerConfig(
             T_set_C=T_set_C,
             m_p_dry_kg=m_p_dry_kg,
             n_trays=n_trays,
             target_velocity_m_s=target_velocity,
+            r_recirc=0.0,  # E configs are r=0 only
+            eps_HRX=eps_HRX,
+            d_variant=e_variant,
+            vpd_bypass_thresh=vpd_bypass_thresh,
         ),
         kinetics=KineticsConfig(phase2_models_root=phase2_root),
         display_geometry=display_geometry,
@@ -679,9 +1074,9 @@ if __name__ == "__main__":
         m_p_dry_kg=10.0,  # 75 kg fresh apples
     )
     
-    # Test 2: Config E cascade
-    print("\n>>> Test 2: Config E (Cascade) - Single Inlet")
-    cfg_e = make_config_E_solar_evap_cond_cascade(
+    # Test 2: Config C2 cascade (mix after solar)
+    print("\n>>> Test 2: Config C2 (Cascade, mix after solar) - Single Inlet")
+    cfg_c2 = make_config_C2_solar_cascade_mix_after(
         ambient_csv=Path("weather/kathmandu.csv"),
         solar_area_m2=12.0,
         m_p_dry_kg=10.0,
