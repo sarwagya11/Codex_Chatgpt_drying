@@ -104,12 +104,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-sim-hours", type=float, default=72.0,
                    help="Hard sim cap (default 72 h)")
     p.add_argument("--batch-starts", type=Path, default=BATCH_STARTS_CSV)
+    p.add_argument("--r-star-csv", type=Path, default=None,
+                   help="CSV with columns config,site,r_star. When given, "
+                        "r-accepting configs run at r=r_star[(config,site)] only. "
+                        "Overrides RECIRC_VALUES_BY_CONFIG and --recirc-values.")
     p.add_argument("--output-dir", type=Path, default=QUARTERLY_DIR)
     p.add_argument("--summary-name", type=str, default="sweep_summary.csv",
                    help="Filename for the rolling summary (under --output-dir)")
     p.add_argument("--dry-run", action="store_true",
                    help="Print planned matrix and exit without simulating")
     return p.parse_args()
+
+
+def load_r_star_table(path: Path | None) -> dict[tuple[str, str], float] | None:
+    if path is None:
+        return None
+    if not path.exists():
+        sys.exit(f"--r-star-csv not found: {path}")
+    df = pd.read_csv(path)
+    needed = {"config", "site", "r_star"}
+    missing = needed - set(df.columns)
+    if missing:
+        sys.exit(f"r-star CSV missing columns: {missing}")
+    table = {(row["config"], row["site"]): float(row["r_star"])
+             for _, row in df.iterrows()}
+    print(f"[r-star] loaded {len(table)} (config, site) entries from {path.name}")
+    return table
 
 
 def get_phase2_path() -> Path | None:
@@ -178,7 +198,22 @@ def build_cfg(config_letter: str, site: str, r_val: float, area_m2: float, args)
     return cfg
 
 
-def r_values_for(cfg_letter: str, args) -> list[float]:
+def r_values_for(
+    cfg_letter: str,
+    site: str,
+    args,
+    r_star_table: dict[tuple[str, str], float] | None = None,
+) -> list[float]:
+    # Highest priority: per-(config, site) r* lookup (stage-2 production)
+    if r_star_table is not None and cfg_letter in R_ACCEPTING_CONFIGS:
+        key = (cfg_letter, site)
+        if key in r_star_table:
+            return [r_star_table[key]]
+        print(f"[r-star] WARN no entry for {key}; falling back to r=0")
+        return [0.0]
+    if r_star_table is not None:
+        # r-star CSV given but this config doesn't accept r
+        return [0.0]
     if args.recirc_values is not None:
         # Global override; but configs that don't accept r still run at r=0
         return args.recirc_values if cfg_letter in R_ACCEPTING_CONFIGS else [0.0]
@@ -277,13 +312,15 @@ def main():
     for k in batches_by_sq:
         batches_by_sq[k] = sorted(batches_by_sq[k])
 
+    r_star_table = load_r_star_table(args.r_star_csv)
+
     runs: list[tuple[str, float, str, str, int, float]] = []
     for cfg_letter in args.configs:
-        r_vals = r_values_for(cfg_letter, args)
         areas_for_cfg = areas_for(cfg_letter, args)
-        for r_val in r_vals:
-            for area in areas_for_cfg:
-                for site in args.sites:
+        for site in args.sites:
+            r_vals = r_values_for(cfg_letter, site, args, r_star_table)
+            for r_val in r_vals:
+                for area in areas_for_cfg:
                     for quarter in args.quarters:
                         batches_iter = (args.batches if args.batches is not None
                                         else batches_by_sq.get((site, quarter), []))
