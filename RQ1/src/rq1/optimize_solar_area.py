@@ -44,7 +44,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 # Import simulation functions
 from rq1.config_solar_hp import (
     make_config_A_HP_only as make_config_A,
-    make_config_B_solar_HP_series as make_config_B,
+    make_config_B1_solar_before_cond as make_config_B,
     make_config_E_solar_evap_cond_cascade as make_config_E,
 )
 from rq1.dryer_solar_hp import run_solar_hp_dryer_simulation as run_solar_hp_dryer

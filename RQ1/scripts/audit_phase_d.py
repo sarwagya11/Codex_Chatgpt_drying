@@ -1,13 +1,13 @@
 """
-Phase D audit: SEC robustness across kinetic models.
+Phase D audit: SEC robustness across kinetic models, FULL sweep.
 
-Run Config A and E2 (no VPD) at KTM and BTN with both M1 (live) and M2
-(Arrhenius+Midilli, full-data LOCO fit) and report the SEC delta.
+Runs all 9 configs (A, B1, C1, D1, D2, D3, E1, E2, E3) at all 3
+locations (biratnagar, kathmandu, taplejung) at r=0 (open-loop) under
+both M1 (live) and M2 (Arrhenius+Midilli, full-data fit) and reports
+the SEC delta. Total: 9 x 3 x 2 = 54 simulations.
 
 If SEC numbers are insensitive to the kinetic-model choice, the SEC
-results in MEMORY are robust to that choice. Phase 6 paired tests
-already showed time-to-MR=0.1 is indistinguishable across M1, M2, M3,
-so we expect SEC deltas to be small.
+results in MEMORY are robust to that choice.
 
 For M2 we monkey-patch `rq1.dryer_solar_hp.compute_dm_w_kinetic_first_order`
 to compute an instantaneous Midilli-equivalent K_eff(t,T,v,RH) and apply
@@ -17,6 +17,7 @@ X0 simultaneously).
 
 Outputs:
   outputs/audit/phase_d_sec_summary.csv
+  outputs/audit/phase_d_sec_delta.csv
   outputs/audit/phase_d_summary.json
 """
 
@@ -37,6 +38,10 @@ from rq1 import dryer_solar_hp as dryer_mod  # noqa: E402
 from rq1.config_solar_hp import (  # noqa: E402
     LOCATION_ELEVATIONS_M,
     make_config_A_HP_only,
+    make_config_B1_solar_before_cond,
+    make_config_B2_solar_after_cond,
+    make_config_C1_solar_on_evap_source,
+    make_config_D_HRX,
     make_config_E_HRX_solar,
 )
 from rq1.kinetics import compute_dm_w_kinetic_first_order as _orig_kin  # noqa: E402
@@ -104,20 +109,36 @@ def build_cfg(config_letter, location):
     weather = RQ1_ROOT / "data" / "ambient" / f"{location}_pvgis_standard.csv"
     elev = LOCATION_ELEVATIONS_M.get(location, 0)
     phase2_root = RQ1_ROOT / "outputs"
+    common = dict(ambient_csv=weather, elevation_m=elev,
+                  phase2_root=phase2_root)
     if config_letter == "A":
         cfg = make_config_A_HP_only(
-            ambient_csv=weather, elevation_m=elev,
-            phase2_root=phase2_root, r_recirc=0.0,
-            n_sections=1, flow_reversal_interval_min=0.0,
-            cond_penalty_thresh=0.0,
-        )
-    elif config_letter == "E2":
+            r_recirc=0.0, n_sections=1,
+            flow_reversal_interval_min=0.0, cond_penalty_thresh=0.0,
+            **common)
+    elif config_letter == "B1":
+        cfg = make_config_B1_solar_before_cond(
+            solar_area_m2=10.0, r_recirc=0.0, n_sections=1,
+            flow_reversal_interval_min=0.0, cond_penalty_thresh=0.0,
+            **common)
+    elif config_letter == "B2":
+        cfg = make_config_B2_solar_after_cond(
+            solar_area_m2=10.0, n_sections=1,
+            flow_reversal_interval_min=0.0,
+            **common)
+    elif config_letter == "C1":
+        cfg = make_config_C1_solar_on_evap_source(
+            solar_area_m2=10.0, r_recirc=0.0, n_sections=1,
+            flow_reversal_interval_min=0.0, cond_penalty_thresh=0.0,
+            **common)
+    elif config_letter in ("D1", "D2", "D3"):
+        cfg = make_config_D_HRX(
+            d_variant=config_letter, eps_HRX=0.70,
+            vpd_bypass_thresh=0.0, **common)
+    elif config_letter in ("E1", "E2", "E3"):
         cfg = make_config_E_HRX_solar(
-            ambient_csv=weather, solar_area_m2=10.0,
-            e_variant="E2", elevation_m=elev,
-            phase2_root=phase2_root, eps_HRX=0.70,
-            vpd_bypass_thresh=0.0,
-        )
+            solar_area_m2=10.0, e_variant=config_letter,
+            eps_HRX=0.70, vpd_bypass_thresh=0.0, **common)
     else:
         raise ValueError(f"unknown config {config_letter}")
     cfg.max_simulation_time_s = 72.0 * 3600.0
@@ -145,12 +166,9 @@ def extract_sec(result):
 
 
 def main():
-    runs = [
-        ("A", "kathmandu"),
-        ("A", "biratnagar"),
-        ("E2", "kathmandu"),
-        ("E2", "biratnagar"),
-    ]
+    configs = ["A", "B1", "B2", "C1", "D1", "D2", "D3", "E1", "E2", "E3"]
+    locations = ["biratnagar", "kathmandu", "dhulikhel", "taplejung"]
+    runs = [(c, l) for c in configs for l in locations]
     rows = []
     for cfg_letter, loc in runs:
         for tag, switch in [("M1", use_m1), ("M2", use_m2)]:

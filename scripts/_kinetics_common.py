@@ -94,6 +94,12 @@ def load_curves(targets_csv: Path, data_dir: Path) -> List[Dict]:
         order = np.argsort(time)
         time_s = time[order]
         mr_raw = np.clip(x[order] / x[order][0], 0.0, 1.1).astype(float)
+        # RH is read from the raw CSV (single source of truth, matches Royen
+        # Table 1). The RH_mid_pct column in phase2_targets.csv was filled with
+        # the literature default 42.5 for stems without an RH token, which
+        # mislabels the four thickness-sweep runs (Royen runs 10-14 are at
+        # RH 35-38 %, not 40-45 %).
+        rh_pct = float(raw["RH_pct"].iloc[0])
         out.append(dict(
             dataset=str(r["dataset"]),
             t=time_s,
@@ -101,7 +107,7 @@ def load_curves(targets_csv: Path, data_dir: Path) -> List[Dict]:
             T_C=float(r["T_C"]),
             v_ms=float(r["v_ms"]),
             d_mm=float(r["thickness_mm"]),
-            RH_pct=float(r["RH_mid_pct"]),
+            RH_pct=rh_pct,
         ))
     return out
 

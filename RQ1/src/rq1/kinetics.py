@@ -102,90 +102,224 @@ def get_keff_table(cfg: KineticsConfig) -> pd.DataFrame:
     return _KEFF_TABLE_DF
 
 
+# ---------------------------------------------------------------------------
+# M1 fit reference state and parameter bounds.
+# These constants MUST match scripts/_kinetics_common.py:T_REF_C/V_REF/D_REF/
+# M1_LO/M1_HI/M1_NOM so that the live simulation and the audit pipeline
+# (Phases A-F) operate on byte-equal parameter vectors.
+# ---------------------------------------------------------------------------
+_M1_T_REF_C = 50.0
+_M1_V_REF = 1.1
+_M1_D_REF = 6.0
+_M1_LO = np.array([math.log(1e-7),     0.0,   0.0, -3.0, -3.0])
+_M1_HI = np.array([math.log(1e-2), 50_000.0, 10.0,  3.0,  3.0])
+_M1_NOM = np.array([math.log(1.9e-4), 2711.0, 1.75, 0.44, 0.66])
+
+
+def _pava_monotone(mr: np.ndarray) -> np.ndarray:
+    """Pool-Adjacent-Violators isotonic regression (monotone decreasing).
+
+    Cleans noise-driven up-ticks in MR(t) before fitting. Algorithm matches
+    scripts/_kinetics_common.py:pava() byte-for-byte.
+    """
+    blocks = []
+    for v in mr:
+        blocks.append((float(v), 1))
+        while len(blocks) >= 2 and blocks[-2][0] < blocks[-1][0]:
+            (a, ca), (b, cb) = blocks[-2], blocks[-1]
+            blocks[-2:] = [((a * ca + b * cb) / (ca + cb), ca + cb)]
+    iso = np.empty_like(mr)
+    i = 0
+    for value, count in blocks:
+        iso[i:i + count] = value
+        i += count
+    return iso
+
+
+def _load_raw_curves_for_m1_fit(targets_csv: Path, data_dir: Path):
+    """Load all 13 thin-layer curves listed in targets_csv with PAVA cleaning.
+
+    Mirrors scripts/_kinetics_common.py:load_curves() exactly.
+    """
+    df = pd.read_csv(targets_csv)
+    out = []
+    for _, r in df.iterrows():
+        raw = pd.read_csv(data_dir / f"{r['dataset']}.csv")
+        time = raw["time_min"].astype(float).to_numpy()
+        x = raw["X_db"].astype(float).to_numpy()
+        order = np.argsort(time)
+        time_s = time[order]
+        mr_raw = np.clip(x[order] / x[order][0], 0.0, 1.1).astype(float)
+        # RH read from raw CSV (single source of truth, matches Royen Table 1).
+        # phase2_targets.RH_mid_pct was filled with literature default 42.5 for
+        # stems without an RH token, mislabeling the four thickness-sweep runs.
+        rh_pct = float(raw["RH_pct"].iloc[0])
+        out.append(dict(
+            dataset=str(r["dataset"]),
+            t=time_s,
+            mr=_pava_monotone(mr_raw),
+            T_C=float(r["T_C"]),
+            v_ms=float(r["v_ms"]),
+            d_mm=float(r["thickness_mm"]),
+            RH_pct=rh_pct,
+        ))
+    return out
+
+
+def _m1_predict_mr(t_min, T_C, RH_pct, v_ms, d_mm, p):
+    """M1 first-order Arrhenius+RH+v+d MR(t) prediction. Matches Phase E."""
+    logK_ref, EaR, alpha_RH, gamma_v, delta_d = p
+    K_ref = math.exp(logK_ref)
+    T_K = T_C + 273.15
+    T_ref_K = _M1_T_REF_C + 273.15
+    K = (K_ref
+         * np.exp(EaR * (1.0 / T_ref_K - 1.0 / T_K))
+         * np.exp(-alpha_RH * RH_pct / 100.0)
+         * (v_ms / _M1_V_REF) ** gamma_v
+         * (_M1_D_REF / d_mm) ** delta_d)
+    return np.clip(np.exp(-K * np.maximum(t_min * 60.0, 0.0)), 0.0, 1.1)
+
+
 def _fit_parametric_keff(cfg: KineticsConfig) -> Optional[Dict]:
-    """Fit K_eff(T, RH, v, d) = K_ref * f_T * f_RH * f_v * f_d from ALL Phase-2 data.
+    """Fit M1 K_eff(T, RH, v, d) by single-stage NLS on raw MR(t) curves.
 
-    Log-linear model (OLS):
-        ln(K) = ln(K_ref) + (Ea/R)*(1/T_ref - 1/T) - alpha*RH + gamma*ln(v/v_ref) + delta*ln(d_ref/d)
+    Five-parameter first-order Arrhenius with RH, velocity, and thickness
+    corrections:
+        K = K_ref * exp((Ea/R)(1/T_ref - 1/T)) * exp(-alpha * RH/100)
+              * (v/v_ref)^gamma * (d_ref/d)^delta
+        MR(t) = exp(-K * t_seconds)
 
-    Uses all 13 experiments (not filtered by v or d), giving a well-constrained
-    5-parameter fit from temperature, RH, velocity, and thickness sweeps.
+    Fitted by scipy.optimize.least_squares on PAVA-cleaned MR(t) data from
+    all 13 thin-layer drying curves simultaneously. Reference state is
+    fixed at T_ref=50C, v_ref=1.1 m/s, d_ref=6 mm to match the audit
+    pipeline (scripts/_kinetics_common.py and audit Phases A-F).
+
+    Returns a dict of physical parameters plus fit diagnostics. Falls back
+    to the legacy two-stage log-linear OLS if the raw-data path is not
+    locatable, and labels the result accordingly via `fit_protocol`.
     """
     global _PARAMETRIC_PARAMS
     if _PARAMETRIC_PARAMS is not None:
         return _PARAMETRIC_PARAMS
 
-    table = get_keff_table(cfg)
-    if table.empty or len(table) < 3:
+    if cfg.phase2_models_root is None:
         return None
 
-    # Reference values
-    T_ref_K = cfg.T_ref_C + 273.15
-    v_ref = cfg.v_ms
-    d_ref = cfg.thickness_mm
+    # Locate raw curves and Phase-2 targets CSV from phase2_models_root.
+    # Layout: <project>/data/<dataset>.csv and
+    #         <project>/outputs/phase2/phase2_targets.csv
+    # phase2_models_root is typically <project>/RQ1/outputs.
+    project_root = cfg.phase2_models_root.parent.parent
+    targets_csv = project_root / "outputs" / "phase2" / "phase2_targets.csv"
+    data_dir = project_root / "data"
 
-    # Data vectors
-    T_K = table["T_C"].values + 273.15
-    RH_frac = table["RH_mid_pct"].values / 100.0
-    v = table["v_ms"].values
-    d = table["thickness_mm"].values
-    K_data = table["K_eff_1_per_s"].values
+    use_nls = targets_csv.exists() and data_dir.exists()
+    if use_nls:
+        try:
+            curves = _load_raw_curves_for_m1_fit(targets_csv, data_dir)
+        except Exception as exc:
+            print(f"[kinetics] raw-curve load failed ({exc}); falling back to OLS")
+            use_nls = False
+    if use_nls and len(curves) < 3:
+        use_nls = False
 
-    # Log-linear design matrix
-    y = np.log(K_data)
-    X = np.column_stack([
-        np.ones(len(table)),             # beta0 = ln(K_ref)
-        1.0 / T_ref_K - 1.0 / T_K,      # beta1 = Ea/R
-        RH_frac,                          # beta2 = -alpha
-        np.log(v / v_ref),               # beta3 = gamma
-        np.log(d_ref / d),               # beta4 = delta
-    ])
+    if use_nls:
+        # Single-stage NLS on raw MR(t) - matches Phase E protocol.
+        from scipy.optimize import least_squares
 
-    beta, residuals, rank, sv = np.linalg.lstsq(X, y, rcond=None)
+        def res(p):
+            return np.concatenate([
+                _m1_predict_mr(c["t"], c["T_C"], c["RH_pct"], c["v_ms"], c["d_mm"], p)
+                - c["mr"]
+                for c in curves
+            ])
 
-    # Extract physical parameters
-    params = {
-        "K_ref": math.exp(beta[0]),
-        "Ea_over_R": beta[1],
-        "alpha_RH": -beta[2],
-        "gamma_v": beta[3],
-        "delta_d": beta[4],
-        "T_ref_K": T_ref_K,
-        "v_ref": v_ref,
-        "d_ref": d_ref,
-    }
+        sol = least_squares(res, _M1_NOM, bounds=(_M1_LO, _M1_HI),
+                            method="trf", max_nfev=20_000,
+                            xtol=1e-12, ftol=1e-12)
+        beta = sol.x
+        n_obs = sum(len(c["t"]) for c in curves)
+        n_par = len(beta)
+        SS_res = float(np.sum(sol.fun ** 2))
+        sigma2_mr = SS_res / max(n_obs - n_par, 1)
+        rmse_mr = float(math.sqrt(SS_res / n_obs))
 
-    # Goodness of fit
-    y_pred = X @ beta
-    SS_res = float(np.sum((y - y_pred) ** 2))
-    SS_tot = float(np.sum((y - np.mean(y)) ** 2))
-    R2 = 1.0 - SS_res / SS_tot if SS_tot > 0 else 0.0
-    RMSE_log = math.sqrt(SS_res / len(table))
-    params["R2"] = R2
-    params["RMSE_log"] = RMSE_log
+        params = {
+            "K_ref": math.exp(beta[0]),
+            "Ea_over_R": float(beta[1]),
+            "alpha_RH": float(beta[2]),
+            "gamma_v": float(beta[3]),
+            "delta_d": float(beta[4]),
+            "T_ref_K": _M1_T_REF_C + 273.15,
+            "v_ref": _M1_V_REF,
+            "d_ref": _M1_D_REF,
+            "fit_protocol": "single-stage NLS on raw MR(t)",
+            "n_curves": len(curves),
+            "n_obs": int(n_obs),
+            "sigma2_mr": float(sigma2_mr),
+            "RMSE_mr": rmse_mr,
+        }
+    else:
+        # Legacy fallback: two-stage log-linear OLS on K-summary table.
+        # Kept so simulations can still run if the raw-data path is missing,
+        # but emits a warning so the user notices the protocol downgrade.
+        table = get_keff_table(cfg)
+        if table.empty or len(table) < 3:
+            return None
+        T_ref_K_legacy = cfg.T_ref_C + 273.15
+        T_K = table["T_C"].values + 273.15
+        RH_frac = table["RH_mid_pct"].values / 100.0
+        v = table["v_ms"].values
+        d = table["thickness_mm"].values
+        K_data = table["K_eff_1_per_s"].values
+        y = np.log(K_data)
+        X = np.column_stack([
+            np.ones(len(table)),
+            1.0 / T_ref_K_legacy - 1.0 / T_K,
+            RH_frac,
+            np.log(v / cfg.v_ms),
+            np.log(cfg.thickness_mm / d),
+        ])
+        beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+        SS_res = float(np.sum((y - X @ beta) ** 2))
+        SS_tot = float(np.sum((y - np.mean(y)) ** 2))
+        R2 = 1.0 - SS_res / SS_tot if SS_tot > 0 else 0.0
+        params = {
+            "K_ref": math.exp(beta[0]),
+            "Ea_over_R": float(beta[1]),
+            "alpha_RH": float(-beta[2]),
+            "gamma_v": float(beta[3]),
+            "delta_d": float(beta[4]),
+            "T_ref_K": T_ref_K_legacy,
+            "v_ref": cfg.v_ms,
+            "d_ref": cfg.thickness_mm,
+            "fit_protocol": "two-stage log-linear OLS on K-summary (LEGACY)",
+            "n_curves": int(len(table)),
+            "n_obs": int(len(table)),
+            "R2_log_K": R2,
+            "RMSE_log_K": float(math.sqrt(SS_res / len(table))),
+        }
+        print("[kinetics] WARNING: raw-curve path missing, using legacy OLS fit")
 
     # Print fit summary
     print(f"\n{'='*70}")
-    print("PARAMETRIC K_eff MODEL (fitted from all Phase-2 experiments)")
+    print(f"PARAMETRIC K_eff MODEL  ({params['fit_protocol']})")
     print(f"{'='*70}")
-    print(f"  K_ref    = {params['K_ref']:.4e} 1/s  (at T={cfg.T_ref_C}C, RH=0%, v={v_ref}, d={d_ref}mm)")
-    print(f"  Ea/R     = {params['Ea_over_R']:.0f} K")
+    print(f"  K_ref    = {params['K_ref']:.4e} 1/s  (at T={params['T_ref_K']-273.15:.1f}C, "
+          f"RH=0%, v={params['v_ref']}, d={params['d_ref']}mm)")
+    print(f"  Ea/R     = {params['Ea_over_R']:.0f} K   "
+          f"(Ea = {params['Ea_over_R']*8.314/1000.0:.2f} kJ/mol)")
     print(f"  alpha_RH = {params['alpha_RH']:.3f}")
-    print(f"  gamma_v  = {params['gamma_v']:.3f}  (K ~ v^gamma)")
-    print(f"  delta_d  = {params['delta_d']:.3f}  (K ~ (d_ref/d)^delta)")
-    print(f"  R2       = {R2:.4f}")
-    print(f"  RMSE(ln K) = {RMSE_log:.4f}")
-    print(f"  n_points = {len(table)}")
-
-    # Per-point comparison
-    print(f"\n  {'T':>4} {'RH%':>5} {'v':>5} {'d':>3} | {'K_data':>10} {'K_fit':>10} {'err%':>7}")
-    print(f"  {'-'*52}")
-    for i in range(len(table)):
-        K_pred = math.exp(y_pred[i])
-        err = (K_pred - K_data[i]) / K_data[i] * 100
-        print(f"  {table.iloc[i]['T_C']:>4.0f} {table.iloc[i]['RH_mid_pct']:>5.1f} "
-              f"{table.iloc[i]['v_ms']:>5.2f} {table.iloc[i]['thickness_mm']:>3.0f} | "
-              f"{K_data[i]:>10.4e} {K_pred:>10.4e} {err:>+7.1f}%")
+    print(f"  gamma_v  = {params['gamma_v']:.3f}")
+    print(f"  delta_d  = {params['delta_d']:.3f}")
+    if "RMSE_mr" in params:
+        print(f"  RMSE(MR)   = {params['RMSE_mr']:.5f}   "
+              f"sigma2 = {params['sigma2_mr']:.4e}")
+        print(f"  n_curves = {params['n_curves']}, n_obs = {params['n_obs']}")
+    else:
+        print(f"  R2(ln K)   = {params['R2_log_K']:.4f}")
+        print(f"  RMSE(ln K) = {params['RMSE_log_K']:.4f}")
+        print(f"  n_points = {params['n_obs']}")
     print(f"{'='*70}\n")
 
     _PARAMETRIC_PARAMS = params

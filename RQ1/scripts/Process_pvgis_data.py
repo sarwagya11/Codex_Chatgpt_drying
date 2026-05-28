@@ -3,24 +3,33 @@
 import argparse
 from pathlib import Path
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import time
 
 
+# Nepal Standard Time offset from UTC.
+NPT_OFFSET = timedelta(hours=5, minutes=45)
+
+
 def parse_pvgis_time(time_str: str) -> datetime:
-    """Convert PVGIS time format '20050101:0010' to datetime."""
-    # Format: YYYYMMdd:HHMM
-    date_part = time_str[:8]  # 20050101
-    time_part = time_str[9:]  # 0010
-    
+    """Convert PVGIS time format '20050101:0010' (UTC) to NPT datetime.
+
+    PVGIS timestamps are in UTC; Nepal Standard Time is UTC+5:45. The
+    returned datetime is shifted into NPT so downstream consumers see
+    Nepal wall-clock labels (e.g., 'GHI peaks near 12:00' refers to NPT
+    noon, not UTC noon).
+    """
+    date_part = time_str[:8]
+    time_part = time_str[9:]
+
     year = int(date_part[:4])
     month = int(date_part[4:6])
     day = int(date_part[6:8])
     hour = int(time_part[:2])
     minute = int(time_part[2:4])
-    
-    return datetime(year, month, day, hour, minute)
+
+    return datetime(year, month, day, hour, minute) + NPT_OFFSET
 
 
 # #region agent log

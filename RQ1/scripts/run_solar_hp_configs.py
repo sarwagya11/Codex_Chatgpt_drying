@@ -22,9 +22,11 @@ from rq1.config_solar_hp import (
     LOCATION_ELEVATIONS_M,
     make_config_0_electric,
     make_config_A_HP_only,
-    make_config_B_solar_HP_series,
-    make_config_C1_solar_cascade_mix_before,
-    make_config_C2_solar_cascade_mix_after,
+    make_config_B1_open,
+    make_config_B2_open,
+    make_config_B1_closed,
+    make_config_B2_closed,
+    make_config_C1_solar_on_evap_source,
     make_config_D_HRX,
     make_config_E_HRX_solar,
 )
@@ -37,11 +39,11 @@ def parse_args():
     parser.add_argument("--test", action="store_true", help="Quick test (Config A, Kathmandu)")
     parser.add_argument("--full", action="store_true", help="Full sweep (all configs x locations x solar areas)")
     
-    parser.add_argument("--config", type=str, choices=["0", "A", "B", "C1", "C2", "D1", "D2", "D3", "E1", "E2", "E3"], help="Single config")
+    parser.add_argument("--config", type=str, choices=["0", "A", "B1_open", "B2_open", "B1_closed", "B2_closed", "C1", "D1", "D2", "D3", "E1", "E2", "E3"], help="Single config")
     parser.add_argument("--location", type=str, help="Location name (e.g., kathmandu)")
     parser.add_argument("--solar-area", type=float, help="Solar collector area [m2]")
 
-    parser.add_argument("--configs", nargs="+", choices=["0", "A", "B", "C1", "C2", "D1", "D2", "D3", "E1", "E2", "E3"], help="Multiple configs")
+    parser.add_argument("--configs", nargs="+", choices=["0", "A", "B1_open", "B2_open", "B1_closed", "B2_closed", "C1", "D1", "D2", "D3", "E1", "E2", "E3"], help="Multiple configs")
     parser.add_argument("--locations", nargs="+", help="Multiple locations")
     parser.add_argument("--solar-areas", nargs="+", type=float, help="Multiple solar areas")
     
@@ -79,6 +81,7 @@ def parse_args():
 def get_weather_path(location: str) -> Path:
     """Get weather file path for location."""
     possible_paths = [
+        PROJECT_ROOT / "data" / "ambient" / f"{location}_pvgis_standard_poa45.csv",
         PROJECT_ROOT / "data" / "ambient" / f"{location}_pvgis_standard.csv",
         PROJECT_ROOT / "data" / "ambient" / f"{location}.csv",
         PROJECT_ROOT / "outputs" / f"{location}_pvgis_standard.csv",
@@ -110,7 +113,7 @@ def run_single_simulation(config_letter: str, location: str, solar_area_m2: floa
                           r_recirc: float = 0.0):
     """Run one simulation."""
     header = f"Running: Config {config_letter}, {location}"
-    if config_letter in ("A", "B", "C1", "C2") and r_recirc > 0:
+    if config_letter in ("A", "B1_closed", "B2_closed", "C1") and r_recirc > 0:
         header += f", r_recirc={r_recirc:.2f}"
     if config_letter not in ("A", "D1", "D2", "D3"):
         header += f", A_solar={solar_area_m2}m2"
@@ -159,8 +162,28 @@ def run_single_simulation(config_letter: str, location: str, solar_area_m2: floa
             flow_reversal_interval_min=flow_reversal,
             cond_penalty_thresh=cond_thresh,
         )
-    elif config_letter == "B":
-        cfg = make_config_B_solar_HP_series(
+    elif config_letter == "B1_open":
+        cfg = make_config_B1_open(
+            ambient_csv=weather_path,
+            solar_area_m2=solar_area_m2,
+            T_set_C=T_set_C,
+            elevation_m=elevation_m,
+            phase2_root=phase2_path.parent if phase2_path else None,
+            n_sections=n_sections,
+            flow_reversal_interval_min=flow_reversal,
+        )
+    elif config_letter == "B2_open":
+        cfg = make_config_B2_open(
+            ambient_csv=weather_path,
+            solar_area_m2=solar_area_m2,
+            T_set_C=T_set_C,
+            elevation_m=elevation_m,
+            phase2_root=phase2_path.parent if phase2_path else None,
+            n_sections=n_sections,
+            flow_reversal_interval_min=flow_reversal,
+        )
+    elif config_letter == "B1_closed":
+        cfg = make_config_B1_closed(
             ambient_csv=weather_path,
             solar_area_m2=solar_area_m2,
             T_set_C=T_set_C,
@@ -169,22 +192,20 @@ def run_single_simulation(config_letter: str, location: str, solar_area_m2: floa
             r_recirc=r_recirc,
             n_sections=n_sections,
             flow_reversal_interval_min=flow_reversal,
-            cond_penalty_thresh=cond_thresh,
+        )
+    elif config_letter == "B2_closed":
+        cfg = make_config_B2_closed(
+            ambient_csv=weather_path,
+            solar_area_m2=solar_area_m2,
+            T_set_C=T_set_C,
+            elevation_m=elevation_m,
+            phase2_root=phase2_path.parent if phase2_path else None,
+            r_recirc=r_recirc,
+            n_sections=n_sections,
+            flow_reversal_interval_min=flow_reversal,
         )
     elif config_letter == "C1":
-        cfg = make_config_C1_solar_cascade_mix_before(
-            ambient_csv=weather_path,
-            solar_area_m2=solar_area_m2,
-            T_set_C=T_set_C,
-            elevation_m=elevation_m,
-            phase2_root=phase2_path.parent if phase2_path else None,
-            n_sections=n_sections,
-            r_recirc=r_recirc,
-            flow_reversal_interval_min=flow_reversal,
-            cond_penalty_thresh=cond_thresh,
-        )
-    elif config_letter == "C2":
-        cfg = make_config_C2_solar_cascade_mix_after(
+        cfg = make_config_C1_solar_on_evap_source(
             ambient_csv=weather_path,
             solar_area_m2=solar_area_m2,
             T_set_C=T_set_C,
@@ -305,7 +326,9 @@ def calculate_total_runs(configs, locations, solar_areas, recirc_values):
             total += len(locations)  # single run per location
         elif config in ("E1", "E2", "E3"):
             total += len(locations) * len(solar_areas)  # sweep solar areas
-        elif config in ("B", "C1", "C2"):
+        elif config in ("B1_open", "B2_open"):
+            total += len(locations) * len(solar_areas)  # open loop: no recirc sweep
+        elif config in ("B1_closed", "B2_closed", "C1"):
             total += len(locations) * len(solar_areas) * len(recirc_values)
         else:
             total += len(locations) * len(solar_areas)
@@ -327,12 +350,12 @@ def main():
         print("MODE: Quick test (Config A, Kathmandu)\n")
 
     elif args.full:
-        configs = ["A", "B", "C1", "C2"]
+        configs = ["A", "B1_open", "B2_open", "B1_closed", "B2_closed", "C1"]
         locations = ["kathmandu", "dhulikhel", "biratnagar", "taplejung"]
         solar_areas = [2, 4, 6, 8, 10, 12, 15, 20]  # No 0 - redundant for solar configs
         # Default recirc sweep for Config A in full mode
         if not args.recirc_values:
-            args.recirc_values = [0.0, 0.3, 0.5, 0.7, 0.9, 1.0]
+            args.recirc_values = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         print("MODE: Full parametric sweep\n")
 
     elif args.config and args.location:
@@ -370,8 +393,8 @@ def main():
     print(f"Configurations: {configs}")
     print(f"Locations: {locations}")
     print(f"Solar areas: {solar_areas}")
-    if any(c in ("A", "B", "C1", "C2") for c in configs) and len(recirc_values) > 1:
-        print(f"Config A/B/C1/C2 recirc values: {recirc_values}")
+    if any(c in ("A", "B1_closed", "B2_closed", "C1") for c in configs) and len(recirc_values) > 1:
+        print(f"Config A/B1_closed/B2_closed/C1 recirc values: {recirc_values}")
     print(f"Total simulations: {total}")
     
     # Run simulations
@@ -499,8 +522,8 @@ def main():
                             "solar_area_m2": solar_area, "r_recirc": 0.0,
                             "success": False, "converged": False, "message": str(e),
                         })
-            elif config in ("B", "C1", "C2"):
-                # Config B/C1/C2: sweep solar areas × recirc values
+            elif config in ("B1_closed", "B2_closed", "C1"):
+                # Closed-loop solar configs: sweep solar areas × recirc values
                 for solar_area in solar_areas:
                     for r_val in recirc_values:
                         count += 1

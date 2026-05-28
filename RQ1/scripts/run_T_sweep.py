@@ -11,7 +11,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 CONFIGS = ["E2", "E3"]
 SITES = ["biratnagar", "kathmandu", "dhulikhel", "taplejung"]
-T_VALUES = [50, 55]
+T_VALUES = [40]
 AREA = 10.0
 MAX_HOURS = 72.0
 

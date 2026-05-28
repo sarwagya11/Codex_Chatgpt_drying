@@ -1662,15 +1662,41 @@ def recurse_node(
     cache: FitCache,
     cfg: Config,
     dataset_name: str,
-    seed_times: Optional[Sequence[float]],
-    hint_window_mins: float,
-    budget: BudgetState,
-    candidate_records: List[CandidateRecord],
-    candidate_meta: List[CandidateMeta],
-    lowess_cache: Dict[Tuple[int, int, float], np.ndarray],
+    *args: object,
+    seed_times: Optional[Sequence[float]] = None,
+    hint_window_mins: float = 30.0,
+    budget: Optional[BudgetState] = None,
+    candidate_records: Optional[List[CandidateRecord]] = None,
+    candidate_meta: Optional[List[CandidateMeta]] = None,
+    lowess_cache: Optional[Dict[Tuple[int, int, float], np.ndarray]] = None,
     is_probe: bool = False,
     probe_passes_remaining: int = 0,
 ) -> None:
+    if args:
+        if len(args) == 2 and budget is None and candidate_records is None:
+            budget, candidate_records = args  # type: ignore[assignment]
+        elif len(args) == 6 and budget is None and candidate_records is None:
+            (
+                seed_times,
+                hint_window_mins,
+                budget,
+                candidate_records,
+                candidate_meta,
+                lowess_cache,
+            ) = args  # type: ignore[assignment]
+        else:
+            raise TypeError(
+                "recurse_node expected either (budget, candidate_records) "
+                "or (seed_times, hint_window_mins, budget, candidate_records, candidate_meta, lowess_cache)"
+            )
+
+    if budget is None or candidate_records is None:
+        raise TypeError("recurse_node missing required arguments: budget, candidate_records")
+    if candidate_meta is None:
+        candidate_meta = []
+    if lowess_cache is None:
+        lowess_cache = {}
+
     if node.depth >= cfg.max_depth:
         return
     if budget.splits_used >= cfg.max_splits:
@@ -1781,8 +1807,18 @@ def recurse_node(
 
 
 def reconstruct_predictions(
-    node: SegmentNode, time: np.ndarray, values: np.ndarray, cfg: Config
-) -> Tuple[np.ndarray, np.ndarray, int, bool]:
+    node: SegmentNode,
+    time: np.ndarray,
+    values_or_cfg: np.ndarray | Config,
+    cfg: Optional[Config] = None,
+) -> Tuple[np.ndarray, np.ndarray, int, bool] | Tuple[np.ndarray, np.ndarray, int]:
+    values: Optional[np.ndarray]
+    if cfg is None:
+        cfg = values_or_cfg  # type: ignore[assignment]
+        values = None
+    else:
+        values = values_or_cfg  # type: ignore[assignment]
+
     preds = np.zeros_like(time, dtype=float)
 
     def _assign(segment: SegmentNode) -> None:
@@ -1804,12 +1840,13 @@ def reconstruct_predictions(
     # Candidate isotonic correction
     iso = isotonic_pav(preds, nonincreasing=True)
 
+    if values is None:
+        return preds, iso, violations
+
     rmse_raw = float(np.sqrt(np.mean((preds - values) ** 2)))
     rmse_iso = float(np.sqrt(np.mean((iso - values) ** 2)))
     use_iso = rmse_iso <= rmse_raw + cfg.iso_rmse_tol
-
-    corrected = iso if use_iso else preds
-    return preds, corrected, violations, use_iso
+    return preds, iso, violations, use_iso
 
 
 
@@ -2274,7 +2311,8 @@ def process_dataset(path: Path, cfg: Config) -> Dict[str, object]:
     for node in gather_nodes(root):
         update_node_diagnostics(node, t, y, cfg)
 
-    preds, corrected, violations, iso_used = reconstruct_predictions(root, t, y, cfg)
+    preds, iso, violations, iso_used = reconstruct_predictions(root, t, y, cfg)
+    corrected = iso if iso_used else preds
     iso_violations = _count_monotonic_violations(corrected, cfg.monotonic_eps)
     rmse_raw = float(np.sqrt(np.mean((preds - y) ** 2)))
     rmse_corrected = float(np.sqrt(np.mean((corrected - y) ** 2)))

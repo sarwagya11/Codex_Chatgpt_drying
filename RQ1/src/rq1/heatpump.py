@@ -21,25 +21,36 @@ except ImportError:
 class HeatPumpConfig:
     """Configuration parameters for heat pump simulation."""
     
-    refrigerant: str = "R134a"
+    refrigerant: str = "R134a"         # Standard heat-pump dryer refrigerant
     eta_isentropic: float = 0.75  # Compressor isentropic efficiency
-    eta_mechanical: float = 0.95  # Mechanical efficiency
+    eta_mechanical: float = 0.90  # Mechanical efficiency
     superheat_K: float = 5.0  # Evaporator outlet superheat
     subcooling_K: float = 5.0  # Condenser outlet subcooling
-    
+
     # Safety limits
-    T_evap_min_C: float = -15.0
+    # T_evap_min_C = -5.0 → R134a anti-frost (sat P @ -5°C = 2.4 bar, safe)
+    # T_cond_max_C = 70.0 → R134a critical temp = 101°C; P_cond @ 70°C ≈ 21 bar (safe)
+    T_evap_min_C: float = -5.0
     T_evap_max_C: float = 20.0
     T_cond_min_C: float = 30.0
     T_cond_max_C: float = 70.0
-    
+
     # Performance limits
     COP_min: float = 2.0
-    pressure_ratio_max: float = 8.0
+    pressure_ratio_max: float = 10.0
+
+    # Reference thresholds for flagging — 1-ton AC in HP dryer mode [kW]
+    # NOT used to cap any values; only used to set feasibility flags in results
+    Q_cond_max_kW: float = 4.0   # 1-ton AC condenser reference
+    Q_evap_max_kW: float = 3.5   # 1-ton AC evaporator reference (Q_cond - W_comp typical)
     
     # Heat exchanger effectiveness
     epsilon_evap: float = 0.85
     epsilon_cond: float = 0.85
+
+    # Evaporator coil approach temperature [K]
+    # Coil surface = T_evap_sat + DT_evap_approach (refrigerant-to-surface resistance)
+    DT_evap_approach:   float = 3.0
 
 
 @dataclass
@@ -74,10 +85,14 @@ class HeatPumpCycleResult:
     
     T_evap_C: float
     T_cond_C: float
-    P_evap_Pa: float
-    P_cond_Pa: float
-    
-    within_limits: bool
+    T_evap_coil_C: float = 0.0   # Evaporator coil surface temperature [°C] (for record output)
+    P_evap_Pa: float = 0.0
+    P_cond_Pa: float = 0.0
+
+    flag_hp_at_capacity: bool = False  # True when Q_cond exceeds Q_cond_max_kW reference (4 kW / 1-ton AC)
+    flag_evap_oversized: bool = False  # True when Q_evap exceeds 1-ton AC evaporator reference
+    flag_cond_oversized: bool = False  # True when Q_cond exceeds 1-ton AC condenser reference
+    within_limits: bool = True
     warning: str | None = None
 
 
@@ -247,7 +262,7 @@ def compute_heat_pump_cycle(
         m_ref = 0.0
     
     Q_evap_kW = m_ref * (h_1 - h_4)
-    W_comp_kW = m_ref * (h_2 - h_1)
+    W_comp_kW = m_ref * (h_2 - h_1) / cfg.eta_mechanical
     Q_cond_kW = m_ref * (h_2 - h_3)
     
     # COP
@@ -277,11 +292,25 @@ def compute_heat_pump_cycle(
         pressure_ratio=pressure_ratio,
         T_evap_C=T_evap_C,
         T_cond_C=T_cond_C,
+        T_evap_coil_C=T_evap_C + cfg.DT_evap_approach,
         P_evap_Pa=P_evap,
         P_cond_Pa=P_cond,
+        flag_hp_at_capacity=(Q_cond_target_kW > cfg.Q_cond_max_kW),
+        flag_evap_oversized=(Q_evap_kW > cfg.Q_evap_max_kW),
+        flag_cond_oversized=(Q_cond_kW > cfg.Q_cond_max_kW),
         within_limits=within_limits,
         warning=warning,
     )
+
+
+def compute_hp_COP(T_evap_C: float, T_cond_C: float, cfg: HeatPumpConfig) -> float:
+    """Return HP COP for given evaporator/condenser temperatures.
+
+    COP depends only on T_evap, T_cond, and config — not on Q_cond_target.
+    Uses a unit-load cycle (Q_cond=1 kW) to avoid computing a full sized cycle.
+    """
+    result = compute_heat_pump_cycle(T_evap_C, T_cond_C, 1.0, cfg)
+    return result.COP
 
 
 def size_heat_pump_for_air_heating(
@@ -290,9 +319,10 @@ def size_heat_pump_for_air_heating(
     m_air_kg_per_s: float,
     T_evap_source_C: float,
     cfg: HeatPumpConfig,
+    omega_in: float | None = None,
 ) -> HeatPumpCycleResult:
     """Size heat pump to heat air from T_in to T_out.
-    
+
     Parameters
     ----------
     T_air_in_C : float
@@ -305,25 +335,42 @@ def size_heat_pump_for_air_heating(
         Temperature of evaporator heat source [°C]
     cfg : HeatPumpConfig
         Heat pump configuration
-    
+    omega_in : float, optional
+        Humidity ratio of condenser inlet air [kg/kg_da].  When provided the
+        heat load is computed from moist-air enthalpy difference (more
+        accurate than cp·ΔT).
+
     Returns
     -------
     HeatPumpCycleResult
         Sized heat pump cycle
     """
     # Heat required
-    cp_air = 1.006  # kJ/kg·K
-    Q_cond_target_kW = m_air_kg_per_s * cp_air * (T_air_out_target_C - T_air_in_C)
+    if omega_in is not None:
+        # Moist-air enthalpy method (accounts for humidity)
+        # h = cp_da*T + omega*(h_fg + cp_v*T)  with cp_da=1.006, h_fg=2501, cp_v=1.86
+        h_in  = 1.006 * T_air_in_C + omega_in * (2501.0 + 1.86 * T_air_in_C)
+        h_out = 1.006 * T_air_out_target_C + omega_in * (2501.0 + 1.86 * T_air_out_target_C)
+        Q_cond_target_kW = m_air_kg_per_s * (h_out - h_in)
+    else:
+        cp_air = 1.006  # kJ/kg·K
+        Q_cond_target_kW = m_air_kg_per_s * cp_air * (T_air_out_target_C - T_air_in_C)
     
     if Q_cond_target_kW <= 0:
         Q_cond_target_kW = 0.001  # Minimum to avoid errors
     
-    # Evaporator temperature (approach temperature ~10 K)
-    T_evap_C = T_evap_source_C - 10.0
-    
     # Condenser temperature (pinch ~10 K above air outlet)
     T_cond_C = T_air_out_target_C + 10.0
-    
+
+    # Evaporator temperature (approach ~10 K below source — no clamping, flags added by caller)
+    T_evap_C = T_evap_source_C - 10.0
+
+    # Hard stop: T_evap must be strictly below T_cond for a valid refrigeration cycle.
+    # Occurs in Config C when solar area is very large (T_solar_out >> T_set).
+    # Minimum 1 K lift maintained so CoolProp does not crash.
+    if T_evap_C >= T_cond_C:
+        T_evap_C = T_cond_C - 1.0
+
     # Compute cycle
     return compute_heat_pump_cycle(T_evap_C, T_cond_C, Q_cond_target_kW, cfg)
 

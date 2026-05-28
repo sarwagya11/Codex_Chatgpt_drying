@@ -30,7 +30,8 @@ class DryerConfig:
     air_density_kg_per_m3: float = 1.2  # used only for residence-time estimates
 
     product_thickness_m: float = 0.006  # Thickness of apple slices (6 mm)
-    product_apparent_density_kg_per_m3: float = 600.0  # Bulk density
+    # Apple fresh apparent density (Rodriguez-Ramirez et al. 2012, J Food Sci 77(12):R146)
+    product_apparent_density_kg_per_m3: float = 750.0
     max_trays: int = 4  # Maximum allowed tray count
 
     enable_tray_diagnostics: bool = True  # controls writing extra per-tray columns

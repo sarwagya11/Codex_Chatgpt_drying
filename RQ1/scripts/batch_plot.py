@@ -32,7 +32,9 @@ def batch_plot_all_results(outputs_dir: Path = None, plot_dir: Path = None):
     
     # Find all CSV files
     csv_files = list(outputs_dir.glob("**/*.csv"))
-    csv_files = [f for f in csv_files if f.stem != "run_summary"]  # Exclude summary
+    # Exclude non-simulation CSVs
+    exclude_stems = {"run_summary", "phase2c_for_chamber"}
+    csv_files = [f for f in csv_files if f.stem not in exclude_stems]
     
     if not csv_files:
         print(f"No CSV files found in {outputs_dir}")
@@ -52,7 +54,7 @@ def batch_plot_all_results(outputs_dir: Path = None, plot_dir: Path = None):
         try:
             create_all_plots(csv_file, output_subdir)
         except Exception as e:
-            print(f"  ✗ Error: {e}")
+            print(f"  [X] Error: {e}")
             continue
     
     print(f"\n{'='*70}")
@@ -119,7 +121,7 @@ if __name__ == "__main__":
         help="Plot all simulation results"
     )
     parser.add_argument(
-        "--config", type=str, choices=["A", "B", "C", "D", "E"],
+        "--config", type=str, choices=["A", "B", "C1", "C2", "D1", "D2", "D3", "E1", "E2"],
         help="Plot specific configuration"
     )
     parser.add_argument(
