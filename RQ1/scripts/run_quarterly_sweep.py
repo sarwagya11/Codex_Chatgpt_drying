@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -113,6 +115,9 @@ def parse_args() -> argparse.Namespace:
                    help="Filename for the rolling summary (under --output-dir)")
     p.add_argument("--dry-run", action="store_true",
                    help="Print planned matrix and exit without simulating")
+    p.add_argument("--workers", type=int, default=1,
+                   help="Worker processes for parallel sim dispatch. "
+                        "1 = sequential (default). Recommended: 16 on the i9-10980XE.")
     return p.parse_args()
 
 
@@ -262,6 +267,61 @@ def extract_metrics(result, start_idx: int) -> dict:
     return out
 
 
+def _build_summary_row(cfg_letter: str, r_val: float, site: str, quarter: str,
+                       batch_idx: int, area: float, start_row: int,
+                       start_dt: str, args) -> dict:
+    return dict(
+        config=cfg_letter,
+        r_recirc=r_val,
+        site=site,
+        quarter=quarter,
+        batch_idx=batch_idx,
+        start_row_index=start_row,
+        start_datetime_NPT=start_dt,
+        solar_area_m2=(area if cfg_letter in SOLAR_CONFIGS else 0.0),
+        T_set_C=args.T_set,
+        eps_HRX=(args.eps_hrx if cfg_letter in (
+            "D1", "D2", "D3", "E1", "E2", "E3"
+        ) else None),
+        vpd_threshold=args.vpd_threshold,
+    )
+
+
+def _run_one_sim(payload: tuple) -> dict:
+    """Worker-process entry point. Self-contained: rebuilds cfg, runs sim,
+    writes per-batch CSV, returns the summary-row dict (with an extra
+    ``_log`` key for the main process to print)."""
+    (cfg_letter, r_val, site, quarter, batch_idx, area,
+     start_row, start_dt, args) = payload
+
+    row = _build_summary_row(cfg_letter, r_val, site, quarter, batch_idx,
+                              area, start_row, start_dt, args)
+
+    try:
+        cfg = build_cfg(cfg_letter, site, r_val, area, args)
+        cfg.ambient.start_index = start_row
+        cfg.ambient.max_steps = int(args.max_batch_hours)
+        result = run_solar_hp_dryer_simulation(cfg)
+        metrics = extract_metrics(result, start_row)
+        row.update(metrics)
+        out_csv = output_path_for(cfg_letter, site, quarter, batch_idx,
+                                  r_val, area, args)
+        result.df.to_csv(out_csv, index=False)
+        try:
+            shown = out_csv.resolve().relative_to(PROJECT_ROOT)
+        except ValueError:
+            shown = out_csv
+        row["_log"] = (f"OK SEC={metrics.get('SEC_elec_kWh_per_kg')}  "
+                       f"t={metrics.get('drying_time_h')}h  "
+                       f"m_w={metrics.get('m_water_kg')} kg  -> {shown}")
+    except Exception as exc:  # noqa: BLE001
+        row.update(dict(success=False, converged=False, message=str(exc)))
+        row["_log"] = (f"FAIL config={cfg_letter} r={r_val} site={site} "
+                       f"{quarter} batch{batch_idx}: {exc}\n"
+                       f"{traceback.format_exc()}")
+    return row
+
+
 def output_path_for(cfg_letter: str, site: str, quarter: str,
                     batch_idx: int, r_val: float, area_m2: float, args) -> Path:
     folder = args.output_dir / f"config_{cfg_letter}" / site / quarter
@@ -349,56 +409,49 @@ def main():
     summary_rows: list[dict] = []
     start_wall = datetime.now()
 
-    for idx, (cfg_letter, r_val, site, quarter, batch_idx, area) in enumerate(runs, 1):
+    # Pre-build per-run payloads (self-contained; safe to pickle to workers)
+    payloads = []
+    for cfg_letter, r_val, site, quarter, batch_idx, area in runs:
         bs = starts_lookup[(site, quarter, batch_idx)]
         start_row = int(bs["start_row_index"])
         start_dt = bs["start_datetime_NPT"]
-        print(f"\n[{idx}/{total}] config={cfg_letter} r={r_val} site={site} "
-              f"{quarter} batch{batch_idx}  A={area} m2  start_row={start_row} "
-              f"({start_dt})")
+        payloads.append((cfg_letter, r_val, site, quarter, batch_idx, area,
+                         start_row, start_dt, args))
 
-        row = dict(
-            config=cfg_letter,
-            r_recirc=r_val,
-            site=site,
-            quarter=quarter,
-            batch_idx=batch_idx,
-            start_row_index=start_row,
-            start_datetime_NPT=start_dt,
-            solar_area_m2=(area if cfg_letter in SOLAR_CONFIGS else 0.0),
-            T_set_C=args.T_set,
-            eps_HRX=(args.eps_hrx if cfg_letter in (
-                "D1", "D2", "D3", "E1", "E2", "E3"
-            ) else None),
-            vpd_threshold=args.vpd_threshold,
-        )
+    summary_path = args.output_dir / args.summary_name
 
-        try:
-            cfg = build_cfg(cfg_letter, site, r_val, area, args)
-            cfg.ambient.start_index = start_row
-            cfg.ambient.max_steps = int(args.max_batch_hours)
-            result = run_solar_hp_dryer_simulation(cfg)
-            metrics = extract_metrics(result, start_row)
-            row.update(metrics)
-            out_csv = output_path_for(cfg_letter, site, quarter, batch_idx, r_val, area, args)
-            result.df.to_csv(out_csv, index=False)
-            try:
-                shown = out_csv.resolve().relative_to(PROJECT_ROOT)
-            except ValueError:
-                shown = out_csv
-            print(f"    OK SEC={metrics['SEC_elec_kWh_per_kg']}  "
-                  f"t={metrics['drying_time_h']}h  "
-                  f"m_w={metrics['m_water_kg']} kg  -> {shown}")
-        except Exception as exc:  # noqa: BLE001
-            import traceback
-            traceback.print_exc()
-            row.update(dict(success=False, converged=False, message=str(exc)))
-        summary_rows.append(row)
+    def _flush(rows: list[dict]) -> None:
+        pd.DataFrame(rows).to_csv(summary_path, index=False)
 
-        # Periodically flush summary so a crash does not lose progress
-        if idx % 20 == 0 or idx == total:
-            pd.DataFrame(summary_rows).to_csv(
-                args.output_dir / args.summary_name, index=False)
+    if args.workers <= 1:
+        # Sequential path
+        for idx, payload in enumerate(payloads, 1):
+            (cfg_letter, r_val, site, quarter, batch_idx, area,
+             start_row, start_dt, _) = payload
+            print(f"\n[{idx}/{total}] config={cfg_letter} r={r_val} site={site} "
+                  f"{quarter} batch{batch_idx}  A={area} m2  "
+                  f"start_row={start_row} ({start_dt})")
+            row = _run_one_sim(payload)
+            log = row.pop("_log", "")
+            print(f"    {log}")
+            summary_rows.append(row)
+            if idx % 20 == 0 or idx == total:
+                _flush(summary_rows)
+    else:
+        # Parallel path (Windows: spawn-based ProcessPoolExecutor)
+        print(f"\n[parallel] dispatching {total} sims across "
+              f"{args.workers} worker processes")
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            futures = [pool.submit(_run_one_sim, p) for p in payloads]
+            for idx, fut in enumerate(as_completed(futures), 1):
+                row = fut.result()
+                log = row.pop("_log", "")
+                tag = (f"[{idx}/{total}] {row['config']} r={row['r_recirc']} "
+                       f"{row['site']} {row['quarter']} batch{row['batch_idx']}")
+                print(f"{tag}  {log}")
+                summary_rows.append(row)
+                if idx % 20 == 0 or idx == total:
+                    _flush(summary_rows)
 
     wall_min = (datetime.now() - start_wall).total_seconds() / 60.0
     df_out = pd.DataFrame(summary_rows)

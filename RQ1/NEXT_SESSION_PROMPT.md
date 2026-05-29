@@ -72,11 +72,12 @@ If you want a different starting point, the two safe ones are (a) write §2 Lite
 
 On the workstation in `D:\Wasti Sims\Codex_Chatgpt_drying-main\RQ1\`:
 
-**Stage 1 (running now):**
+**Stage 1 (running now, 16-worker parallel):**
 ```cmd
 "C:\Users\Student\ladybug_tools\python\python.exe" scripts\run_quarterly_sweep.py ^
   --batch-starts outputs\quarterly\screening_batch_starts.csv ^
   --configs A C1 B1_closed B2_closed ^
+  --workers 16 ^
   --summary-name sweep_summary_stage1.csv ^
   > outputs\quarterly\stage1.log 2>&1
 ```
@@ -90,11 +91,12 @@ On the workstation in `D:\Wasti Sims\Codex_Chatgpt_drying-main\RQ1\`:
 
 Sanity-check r* before launching stage 2: flag (a) any (config, site) hitting r=0.9 in every site (plateau may extend further), (b) any unexpected r=0 picks for A or C1 (would suggest a humidity or load-mismatch bug).
 
-**Stage 2 (after r* sign-off):**
+**Stage 2 (after r* sign-off, 16-worker parallel):**
 ```cmd
 "C:\Users\Student\ladybug_tools\python\python.exe" scripts\run_quarterly_sweep.py ^
   --batch-starts outputs\quarterly\production_batch_starts.csv ^
   --r-star-csv outputs\quarterly\r_star_by_config_site.csv ^
+  --workers 16 ^
   --summary-name sweep_summary_stage2.csv ^
   > outputs\quarterly\stage2.log 2>&1
 ```
