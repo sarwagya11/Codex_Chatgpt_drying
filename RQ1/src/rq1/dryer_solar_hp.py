@@ -1558,25 +1558,36 @@ def simulate_config_D_HRX(cfg: SimulationConfig) -> SolarHPDryerResult:
         elif d_variant == "D2":
             T_air_in_cond = T_amb_heated
             omega_to_chamber = omega_amb_hrx
-            T_evap_source = T_exh_cooled
-            _cp_air = 1.006
-            _T_evap_coil = T_exh_cooled - 10.0
-            _Q_exh_avail = m_da * _cp_air * hp_cfg.epsilon_evap * max(0.0, T_exh_cooled - _T_evap_coil)
-            _hp_trial = size_heat_pump_for_air_heating(
-                T_air_in_C=T_air_in_cond,
-                T_air_out_target_C=cfg.dryer.T_set_C,
-                m_air_kg_per_s=m_da,
-                T_evap_source_C=T_exh_cooled,
-                cfg=hp_cfg,
-                omega_in=omega_to_chamber,
-            )
-            if _hp_trial.Q_evap_kW > _Q_exh_avail and T_amb_C > _T_evap_coil:
-                _Q_deficit = _hp_trial.Q_evap_kW - _Q_exh_avail
-                _m_amb_extra = _Q_deficit / (_cp_air * (T_amb_C - _T_evap_coil))
-                T_evap_source = (
-                    (m_da * T_exh_cooled + _m_amb_extra * T_amb_C)
-                    / (m_da + _m_amb_extra)
+            if cfg.dryer.use_iterative_evap_for_d2:
+                T_evap_source, _m_amb_extra = _iterative_evap_sizing(
+                    T_exh_cooled=T_exh_cooled,
+                    T_amb_C=T_amb_C,
+                    m_da=m_da,
+                    T_air_in_cond=T_air_in_cond,
+                    T_cond_target=cfg.dryer.T_set_C,
+                    hp_cfg=hp_cfg,
+                    omega_to_chamber=omega_to_chamber,
                 )
+            else:
+                T_evap_source = T_exh_cooled
+                _cp_air = 1.006
+                _T_evap_coil = T_exh_cooled - 10.0
+                _Q_exh_avail = m_da * _cp_air * hp_cfg.epsilon_evap * max(0.0, T_exh_cooled - _T_evap_coil)
+                _hp_trial = size_heat_pump_for_air_heating(
+                    T_air_in_C=T_air_in_cond,
+                    T_air_out_target_C=cfg.dryer.T_set_C,
+                    m_air_kg_per_s=m_da,
+                    T_evap_source_C=T_exh_cooled,
+                    cfg=hp_cfg,
+                    omega_in=omega_to_chamber,
+                )
+                if _hp_trial.Q_evap_kW > _Q_exh_avail and T_amb_C > _T_evap_coil:
+                    _Q_deficit = _hp_trial.Q_evap_kW - _Q_exh_avail
+                    _m_amb_extra = _Q_deficit / (_cp_air * (T_amb_C - _T_evap_coil))
+                    T_evap_source = (
+                        (m_da * T_exh_cooled + _m_amb_extra * T_amb_C)
+                        / (m_da + _m_amb_extra)
+                    )
 
         elif d_variant == "D3":
             T_air_in_cond = T_exh_cooled
@@ -1657,6 +1668,7 @@ def simulate_config_D_HRX(cfg: SimulationConfig) -> SolarHPDryerResult:
         record["T_to_chamber_deficit_C"] = cfg.dryer.T_set_C - T_to_chamber_C
         record["vpd_utilization"] = _vpd_utilization
         record["vpd_bypass_active"] = int(_vpd_bypass_active)
+        record["m_amb_extra_kg_per_s"] = _m_amb_extra
         # Flags
         record["flag_hp_at_capacity"] = int(hp_result is not None and hp_result.flag_hp_at_capacity)
         record["flag_evap_oversized"] = int(hp_result is not None and hp_result.flag_evap_oversized)

@@ -302,6 +302,15 @@ class DryerConfig:
     eps_HRX: float = 0.70               # HRX effectiveness [-]
     d_variant: str = ""                  # "B1_open", "B2_open", "B1_closed", "B2_closed", "D1"..."D3", "E1"..."E3" (set by factory)
     evap_ambient_mixing: bool = False    # D2: mix ambient with cooled exhaust at evap
+    # D2 evaporator-supplement routine. False = legacy closed-form single-step
+    # (one HP trial sized on T_exh_cooled, ambient makeup back-solved against
+    # T_amb - T_evap_coil). True = fixed-point _iterative_evap_sizing routine
+    # (same routine used by B1_open, B2_open, E2, E3). The closed-form ignores
+    # the feedback from T_evap_source -> COP -> Q_evap when the supplement is
+    # active, so it leaves a per-step evaporator energy-balance residual that
+    # the iterative path closes. A/B testing flipped the default to True on
+    # 2026-05-29 after a Namche-Q1 cell showed the residual was material.
+    use_iterative_evap_for_d2: bool = True
     # VPD-based exhaust bypass for open-loop D/E configs.
     # When VPD utilization (drying%) < this threshold, route warm exhaust
     # directly to condenser (tiny Q_cond) instead of HRX+ambient path.
